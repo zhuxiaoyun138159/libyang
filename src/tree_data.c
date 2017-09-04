@@ -76,7 +76,6 @@ lyd_check_mandatory_data(struct lyd_node *root, struct lyd_node *last_parent,
                          struct ly_set *instances, struct lys_node *schema, int options)
 {
     struct lyd_node *dummy, *current;
-    int state;
     uint32_t limit;
 
     if (!instances->number) {
@@ -104,12 +103,12 @@ lyd_check_mandatory_data(struct lyd_node *root, struct lyd_node *last_parent,
                 }
                 for (current = dummy; current; current = current->child) {
                     ly_vlog_hide(1);
-                    resolve_when(current, &state, 0);
+                    resolve_when(current, 0, NULL);
                     ly_vlog_hide(0);
-                    if (!state) {
+                    if (current->when_status & LYD_WHEN_FALSE) {
                         /* when evaluates to false */
                         lyd_free(dummy);
-                        ly_err_clean(1);
+                        ly_err_clean(ly_parser_data.ctx, 1);
                         return EXIT_SUCCESS;
                     }
 
@@ -403,11 +402,15 @@ lyd_parse_(struct ly_ctx *ctx, const struct lyd_node *rpc_act, const char *data,
     struct lyxml_elem *xml;
     struct lyd_node *result = NULL;
     int xmlopt = LYXML_PARSE_MULTIROOT;
+    struct ly_ctx *ctx_prev = ly_parser_data.ctx;
 
     if (!ctx || !data) {
         LOGERR(LY_EINVAL, "%s: Invalid parameter.", __func__);
         return NULL;
     }
+
+    /* set parser context */
+    ly_parser_data.ctx = ctx;
 
     if (options & LYD_OPT_NOSIBLINGS) {
         xmlopt = 0;
@@ -417,7 +420,7 @@ lyd_parse_(struct ly_ctx *ctx, const struct lyd_node *rpc_act, const char *data,
     case LYD_XML:
         xml = lyxml_parse_mem(ctx, data, xmlopt);
         if (ly_errno) {
-            return NULL;
+            break;
         }
         if (options & LYD_OPT_RPCREPLY) {
             result = lyd_parse_xml(ctx, &xml, options, rpc_act, data_tree);
@@ -433,8 +436,11 @@ lyd_parse_(struct ly_ctx *ctx, const struct lyd_node *rpc_act, const char *data,
         break;
     default:
         /* error */
-        return NULL;
+        break;
     }
+
+    /* reset parser context */
+    ly_parser_data.ctx = ctx_prev;
 
     if (ly_errno) {
         lyd_free_withsiblings(result);
@@ -449,7 +455,7 @@ lyd_parse_data_(struct ly_ctx *ctx, const char *data, LYD_FORMAT format, int opt
 {
     const struct lyd_node *rpc_act = NULL, *data_tree = NULL, *iter;
 
-    if (lyp_check_options(options, __func__)) {
+    if (lyp_data_check_options(options, __func__)) {
         return NULL;
     }
 
@@ -463,6 +469,12 @@ lyd_parse_data_(struct ly_ctx *ctx, const char *data, LYD_FORMAT format, int opt
     if (options & (LYD_OPT_RPC | LYD_OPT_NOTIF | LYD_OPT_RPCREPLY)) {
         data_tree = va_arg(ap, const struct lyd_node *);
         if (data_tree) {
+            if (options & LYD_OPT_NOEXTDEPS) {
+                LOGERR(LY_EINVAL, "%s: invalid parameter (variable arg const struct lyd_node *data_tree and LYD_OPT_NOEXTDEPS set).",
+                       __func__);
+                return NULL;
+            }
+
             LY_TREE_FOR(data_tree, iter) {
                 if (iter->parent) {
                     /* a sibling is not top-level */
@@ -515,7 +527,7 @@ lyd_parse_fd_(struct ly_ctx *ctx, int fd, LYD_FORMAT format, int options, va_lis
         LOGERR(LY_ESYS, "Mapping file descriptor into memory failed (%s()).", __func__);
         return NULL;
     } else if (!data) {
-        ly_err_clean(1);
+        ly_err_clean(ly_parser_data.ctx, 1);
         return NULL;
     }
 
@@ -3243,7 +3255,7 @@ movedone:
     }
     lyd_free_diff(result2);
 
-    ly_err_clean(1);
+    ly_err_clean(ly_parser_data.ctx, 1);
     return result;
 
 error:
@@ -4123,17 +4135,19 @@ lyd_validate(struct lyd_node **node, int options, void *var_arg)
     int ret = EXIT_FAILURE, i;
     struct unres_data *unres = NULL;
     struct ly_set *set;
-
-    ly_err_clean(1);
+    struct ly_ctx *ctx_prev = ly_parser_data.ctx;
 
     if (!node) {
         ly_errno = LY_EINVAL;
         return EXIT_FAILURE;
     }
 
-    if (lyp_check_options(options, __func__)) {
+    if (lyp_data_check_options(options, __func__)) {
         return EXIT_FAILURE;
     }
+
+    /* set parser context - initialization before getting correct context to avoid incorrect context usage */
+    ly_parser_data.ctx = NULL;
 
     unres = calloc(1, sizeof *unres);
     LY_CHECK_ERR_RETURN(!unres, LOGMEM, EXIT_FAILURE);
@@ -4160,6 +4174,12 @@ lyd_validate(struct lyd_node **node, int options, void *var_arg)
         /* get the additional data tree if given */
         data_tree = (struct lyd_node *)var_arg;
         if (data_tree) {
+            if (options & LYD_OPT_NOEXTDEPS) {
+                LOGERR(LY_EINVAL, "%s: invalid parameter (variable arg const struct lyd_node *data_tree and LYD_OPT_NOEXTDEPS set).",
+                       __func__);
+                goto cleanup;
+            }
+
             LY_TREE_FOR(data_tree, iter) {
                 if (iter->parent) {
                     /* a sibling is not top-level */
@@ -4185,6 +4205,8 @@ lyd_validate(struct lyd_node **node, int options, void *var_arg)
             }
         }
     }
+    /* set parser context */
+    ly_parser_data.ctx = ctx;
 
     if ((options & (LYD_OPT_RPC | LYD_OPT_RPCREPLY)) && *node && ((*node)->schema->nodetype != LYS_RPC)) {
         options |= LYD_OPT_ACT_NOTIF;
@@ -4354,6 +4376,9 @@ cleanup:
         free(unres->type);
         free(unres);
     }
+
+    /* reset parser context */
+    ly_parser_data.ctx = ctx_prev;
 
     return ret;
 }
@@ -5096,7 +5121,7 @@ lyd_get_unique_default(const char* unique_expr, struct lyd_node *list)
             node = last->child;
             if (lyv_multicases(NULL, (struct lys_node *)parent, &node, 0, NULL)) {
                 /* another case is present */
-                ly_err_clean(1);
+                ly_err_clean(ly_parser_data.ctx, 1);
                 dflt = NULL;
                 goto end;
             }

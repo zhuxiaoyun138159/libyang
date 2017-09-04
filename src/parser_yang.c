@@ -1891,7 +1891,7 @@ yang_check_deviate_must(struct lys_module *module, struct unres_schema *unres,
         goto error;
     }
     /* check XPath dependencies */
-    if (*trg_must_size && unres_schema_add_node(module, unres, dev_target, UNRES_XPATH, NULL)) {
+    if (*trg_must_size && (unres_schema_add_node(module, unres, dev_target, UNRES_XPATH, NULL) == -1)) {
         goto error;
     }
 
@@ -4377,7 +4377,14 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
             }
         }
         /* unlink and store the original node */
+        parent = dev_target->parent;
         lys_node_unlink(dev_target);
+        if (parent && parent->nodetype == LYS_AUGMENT) {
+            /* hack for augment, because when the original will be sometime reconnected back, we actually need
+             * to reconnect it to both - the augment and its target (which is deduced from the deviations target
+             * path), so we need to remember the augment as an addition */
+            dev_target->parent = parent;
+        }
         dev->orig_node = dev_target;
     } else {
         /* store a shallow copy of the original node */
