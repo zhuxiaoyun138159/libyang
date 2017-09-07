@@ -4799,6 +4799,7 @@ resolve_uses(struct lys_node_uses *uses, struct unres_schema *unres)
                 must[j].ref = lydict_insert(ctx, rfn->must[k].ref, 0);
                 must[j].eapptag = lydict_insert(ctx, rfn->must[k].eapptag, 0);
                 must[j].emsg = lydict_insert(ctx, rfn->must[k].emsg, 0);
+                must[j].flags = rfn->must[k].flags;
             }
 
             *old_must = must;
@@ -7224,7 +7225,7 @@ check_instid_ext_dep(const struct lys_node *sleaf, const char *json_instid)
     if (!first_node) {
         /* unknown path, say it is not external */
         free(buf);
-        ly_errno = LYE_SUCCESS;
+        ly_errno = LY_SUCCESS;
         return 0;
     }
     free(buf);
