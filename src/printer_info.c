@@ -256,7 +256,7 @@ info_print_typedef_with_include(struct lyout *out, const struct lys_module *mod)
 static void
 info_print_type_detail(struct lyout *out, const struct lys_type *type, int uni)
 {
-    int i;
+    unsigned int i;
 
     if (uni) {
         ly_print(out, "  ");
@@ -1018,7 +1018,7 @@ info_print_model(struct lyout *out, const struct lys_module *module, const char 
     } else {
         if ((target_node[0] == '/') || !strncmp(target_node, "type/", 5)) {
             rc = resolve_absolute_schema_nodeid((target_node[0] == '/' ? target_node : target_node + 4), module,
-                                                LYS_ANY, (const struct lys_node **)&target);
+                                                LYS_ANY & ~(LYS_USES | LYS_AUGMENT | LYS_GROUPING), (const struct lys_node **)&target);
             if (rc || !target) {
                 ly_print(out, "Target %s could not be resolved.\n", (target_node[0] == '/' ? target_node : target_node + 4));
                 return EXIT_FAILURE;
