@@ -2201,7 +2201,7 @@ resolve_json_nodeid(const char *nodeid, struct ly_ctx *ctx, const struct lys_nod
 
         memmove(module_name, mod_name, mod_name_len);
         module_name[mod_name_len] = '\0';
-        module = ly_ctx_get_module(ctx, module_name, NULL);
+        module = ly_ctx_get_module(ctx, module_name, NULL, 1);
 
         if (buf_backup) {
             /* return previous internal buffer content */
@@ -2256,7 +2256,7 @@ resolve_json_nodeid(const char *nodeid, struct ly_ctx *ctx, const struct lys_nod
                     memmove(module_name, mod_name, mod_name_len);
                     module_name[mod_name_len] = '\0';
                     /* will also find an augment module */
-                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL);
+                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL, 1);
 
                     if (buf_backup) {
                         /* return previous internal buffer content */
@@ -2532,7 +2532,7 @@ resolve_partial_json_data_nodeid(const char *nodeid, const char *llist_value, st
                     memmove(module_name, mod_name, mod_name_len);
                     module_name[mod_name_len] = '\0';
                     /* will also find an augment module */
-                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL);
+                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL, 1);
 
                     if (buf_backup) {
                         /* return previous internal buffer content */
@@ -2580,8 +2580,8 @@ resolve_partial_json_data_nodeid(const char *nodeid, const char *llist_value, st
                         }
                     }
 
-                    /* make value canonical */
-                    if ((llist->value_type & LY_TYPE_IDENT)
+                    /* make value canonical (remove module name prefix) unless it was specified with it */
+                    if (!strchr(llist_value, ':') && (llist->value_type & LY_TYPE_IDENT)
                             && !strncmp(llist->value_str, lyd_node_module(sibling)->name, strlen(lyd_node_module(sibling)->name))
                             && (llist->value_str[strlen(lyd_node_module(sibling)->name)] == ':')) {
                         data_val = llist->value_str + strlen(lyd_node_module(sibling)->name) + 1;
@@ -3910,142 +3910,160 @@ get_next_augment:
  *
  * @param[in] prev_mod Previous module to use in case there is no prefix.
  * @param[in] pred Predicate to use.
- * @param[in,out] node_match Nodes matching the restriction without
- *                           the predicate. Nodes not satisfying
- *                           the predicate are removed.
+ * @param[in,out] node Node matching the restriction without
+ *                     the predicate. If it does not satisfy the predicate,
+ *                     it is set to NULL.
  *
  * @return Number of characters successfully parsed,
  *         positive on success, negative on failure.
  */
 static int
-resolve_instid_predicate(const struct lys_module *prev_mod, const char *pred, struct unres_data *node_match)
+resolve_instid_predicate(const struct lys_module *prev_mod, const char *pred, struct lyd_node **node, int cur_idx)
 {
-    /* ... /node[target = value] ... */
-    struct lyd_node *target;
+    /* ... /node[key=value] ... */
+    struct lyd_node_leaf_list *key;
+    struct lys_node_leaf **list_keys = NULL;
+    struct lys_node_list *slist;
     const char *model, *name, *value;
-    int mod_len, nam_len, val_len, i, has_predicate, cur_idx, idx, parsed, pred_iter, k;
-    uint32_t j;
+    int mod_len, nam_len, val_len, i, has_predicate, parsed;
 
-    assert(pred && node_match->count);
+    assert(pred && node && *node);
 
-    idx = -1;
     parsed = 0;
-
-    pred_iter = -1;
     do {
-        if ((i = parse_predicate(pred, &model, &mod_len, &name, &nam_len, &value, &val_len, &has_predicate)) < 1) {
-            return -parsed+i;
+        if ((i = parse_predicate(pred + parsed, &model, &mod_len, &name, &nam_len, &value, &val_len, &has_predicate)) < 1) {
+            return -parsed + i;
         }
         parsed += i;
-        pred += i;
 
-        if (isdigit(name[0])) {
-            /* pos */
+        /* target */
+        if (name[0] == '.') {
+            /* leaf-list value */
+            if ((*node)->schema->nodetype != LYS_LEAFLIST) {
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects leaf-list, but have %s \"%s\".",
+                       strnodetype((*node)->schema->nodetype), (*node)->schema->name);
+                parsed = -1;
+                goto cleanup;
+            }
+
+            /* check the value */
+            if (strncmp(((struct lyd_node_leaf_list *)*node)->value_str, value, val_len)
+                    || ((struct lyd_node_leaf_list *)*node)->value_str[val_len]) {
+                *node = NULL;
+                goto cleanup;
+            }
+
+        } else if (isdigit(name[0])) {
             assert(!value);
-            idx = atoi(name);
-        } else if (name[0] != '.') {
-            /* list keys */
-            if (pred_iter < 0) {
-                pred_iter = 1;
-            } else {
-                ++pred_iter;
+
+            /* keyless list position */
+            if ((*node)->schema->nodetype != LYS_LIST) {
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects list, but have %s \"%s\".",
+                       strnodetype((*node)->schema->nodetype), (*node)->schema->name);
+                parsed = -1;
+                goto cleanup;
             }
-        }
 
-        for (cur_idx = 1, j = 0; j < node_match->count; ++cur_idx) {
-            /* target */
-            if (name[0] == '.') {
-                /* leaf-list value */
-                if (node_match->node[j]->schema->nodetype != LYS_LEAFLIST) {
-                    goto remove_instid;
-                }
+            if (((struct lys_node_list *)(*node)->schema)->keys) {
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects list without keys, but have list \"%s\".",
+                       (*node)->schema->name);
+                parsed = -1;
+                goto cleanup;
+            }
 
-                target = node_match->node[j];
-                /* check the value */
-                if (strncmp(((struct lyd_node_leaf_list *)target)->value_str, value, val_len)
-                    || ((struct lyd_node_leaf_list *)target)->value_str[val_len]) {
-                    goto remove_instid;
-                }
+            /* check the index */
+            if (atoi(name) != cur_idx) {
+                *node = NULL;
+                goto cleanup;
+            }
 
-            } else if (!value) {
-                /* keyless list position */
-                if ((node_match->node[j]->schema->nodetype != LYS_LIST)
-                        || ((struct lys_node_list *)node_match->node[j]->schema)->keys) {
-                    goto remove_instid;
-                }
+        } else {
+            /* list key value */
+            if ((*node)->schema->nodetype != LYS_LIST) {
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects list, but have %s \"%s\".",
+                       strnodetype((*node)->schema->nodetype), (*node)->schema->name);
+                parsed = -1;
+                goto cleanup;
+            }
+            slist = (struct lys_node_list *)(*node)->schema;
 
-                if (idx != cur_idx) {
-                    goto remove_instid;
-                }
-
-            } else {
-                /* list key value */
-                if (node_match->node[j]->schema->nodetype != LYS_LIST) {
-                    goto remove_instid;
-                }
-
-                /* find the key leaf */
-                for (k = 1, target = node_match->node[j]->child; target && (k < pred_iter); k++, target = target->next);
-                if (!target) {
-                    goto remove_instid;
-                }
-                if ((struct lys_node_leaf *)target->schema !=
-                        ((struct lys_node_list *)node_match->node[j]->schema)->keys[pred_iter - 1]) {
-                    goto remove_instid;
-                }
-
-                /* check name */
-                if (strncmp(target->schema->name, name, nam_len) || target->schema->name[nam_len]) {
-                    goto remove_instid;
-                }
-
-                /* check module */
-                if (model) {
-                    if (strncmp(target->schema->module->name, model, mod_len)
-                            || target->schema->module->name[mod_len]) {
-                        goto remove_instid;
-                    }
-                } else {
-                    if (target->schema->module != prev_mod) {
-                        goto remove_instid;
-                    }
-                }
-
-                /* check the value */
-                if (strncmp(((struct lyd_node_leaf_list *)target)->value_str, value, val_len)
-                    || ((struct lyd_node_leaf_list *)target)->value_str[val_len]) {
-                    goto remove_instid;
+            /* prepare key array */
+            if (!list_keys) {
+                list_keys = malloc(slist->keys_size * sizeof *list_keys);
+                LY_CHECK_ERR_RETURN(!list_keys, LOGMEM, -1);
+                for (i = 0; i < slist->keys_size; ++i) {
+                    list_keys[i] = slist->keys[i];
                 }
             }
 
-            /* instid is ok, continue check with the next one */
-            ++j;
-            continue;
+            /* find the schema key leaf */
+            for (i = 0; i < slist->keys_size; ++i) {
+                if (list_keys[i] && !strncmp(list_keys[i]->name, name, nam_len) && !list_keys[i]->name[nam_len]) {
+                    break;
+                }
+            }
+            if (i == slist->keys_size) {
+                /* this list has no such key */
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects list with the key \"%.*s\","
+                       " but list \"%s\" does not define it.", nam_len, name, slist->name);
+                parsed = -1;
+                goto cleanup;
+            }
 
-remove_instid:
-            /* does not fulfill conditions, remove instid record */
-            unres_data_del(node_match, j);
+            /* check module */
+            if (model) {
+                if (strncmp(list_keys[i]->module->name, model, mod_len) || list_keys[i]->module->name[mod_len]) {
+                    LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects key \"%s\" from module \"%.*s\", not \"%s\".",
+                           list_keys[i]->name, model, mod_len, list_keys[i]->module->name);
+                    parsed = -1;
+                    goto cleanup;
+                }
+            } else {
+                if (list_keys[i]->module != prev_mod) {
+                    LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier expects key \"%s\" from module \"%s\", not \"%s\".",
+                           list_keys[i]->name, prev_mod->name, list_keys[i]->module->name);
+                    parsed = -1;
+                    goto cleanup;
+                }
+            }
+
+            /* find the actual data key */
+            for (key = (struct lyd_node_leaf_list *)(*node)->child; key; key = (struct lyd_node_leaf_list *)key->next) {
+                if (key->schema == (struct lys_node *)list_keys[i]) {
+                    break;
+                }
+            }
+            if (!key) {
+                /* list instance is missing a key? definitely should not happen */
+                LOGINT;
+                parsed = -1;
+                goto cleanup;
+            }
+
+            /* check the value */
+            if (strncmp(key->value_str, value, val_len) || key->value_str[val_len]) {
+                *node = NULL;
+                goto cleanup;
+            }
+
+            /* everything is fine, mark this key as resolved */
+            list_keys[i] = NULL;
         }
     } while (has_predicate);
 
     /* check that all list keys were specified */
-    if ((pred_iter > 0) && node_match->count) {
-        j = 0;
-        while (j < node_match->count) {
-            assert(node_match->node[j]->schema->nodetype == LYS_LIST);
-            if (pred_iter < ((struct lys_node_list *)node_match->node[j]->schema)->keys_size) {
-                /* not enough predicates, just remove the list instance */
-                unres_data_del(node_match, j);
-            } else {
-                ++j;
+    if (list_keys) {
+        for (i = 0; i < slist->keys_size; ++i) {
+            if (list_keys[i]) {
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier is missing list key \"%s\".", list_keys[i]->name);
+                parsed = -1;
+                goto cleanup;
             }
-        }
-
-        if (!node_match->count) {
-            LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Instance identifier is missing some list keys.");
         }
     }
 
+cleanup:
+    free(list_keys);
     return parsed;
 }
 
@@ -6140,6 +6158,7 @@ check_leafref_features(struct lys_type *type)
 {
     struct lys_node *iter;
     struct ly_set *src_parents, *trg_parents, *features;
+    struct lys_node_augment *aug;
     unsigned int i, j, size, x;
     int ret = EXIT_SUCCESS;
 
@@ -6154,12 +6173,28 @@ check_leafref_features(struct lys_type *type)
         if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
             continue;
         }
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT) && lys_node_module(iter->parent)->implemented) {
+            aug = (struct lys_node_augment *)iter->parent;
+            if ((aug->flags & LYS_NOTAPPLIED) || !aug->target) {
+                /* unresolved augment, wait until it's resolved */
+                ret = EXIT_FAILURE;
+                goto cleanup;
+            }
+        }
         ly_set_add(src_parents, iter, LY_SET_OPT_USEASLIST);
     }
     /* get parents chain of target */
     for (iter = (struct lys_node *)type->info.lref.target; iter; iter = lys_parent(iter)) {
         if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
             continue;
+        }
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT) && lys_node_module(iter->parent)->implemented) {
+            aug = (struct lys_node_augment *)iter->parent;
+            if ((aug->flags & LYS_NOTAPPLIED) || !aug->target) {
+                /* unresolved augment, wait until it's resolved */
+                ret = EXIT_FAILURE;
+                goto cleanup;
+            }
         }
         ly_set_add(trg_parents, iter, LY_SET_OPT_USEASLIST);
     }
@@ -6265,7 +6300,7 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
                           struct unres_schema *unres)
 {
     /* has_str - whether the str_snode is a string in a dictionary that needs to be freed */
-    int rc = -1, has_str = 0, parent_type = 0, i, k;
+    int rc = -1, has_str = 0, parent_type = 0, i, k, hidden;
     unsigned int j;
     struct lys_node *root, *next, *node, *par_grp;
     const char *expr;
@@ -6306,14 +6341,14 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
         rc = resolve_schema_leafref(stype->info.lref.path, node, (const struct lys_node **)&stype->info.lref.target);
         if (!rc) {
             assert(stype->info.lref.target);
-            /* check if leafref and its target are under a common if-features */
-            rc = check_leafref_features(stype);
-            if (rc) {
-                break;
-            }
 
             if (lys_node_module(node)->implemented) {
-                /* make all the modules on the path implemented */
+                /* make all the modules on the path implemented, print verbose messages */
+                hidden = ly_vlog_hidden;
+                if (hidden) {
+                    ly_vlog_hide(0);
+                }
+
                 for (next = (struct lys_node *)stype->info.lref.target; next; next = lys_parent(next)) {
                     if (!lys_node_module(next)->implemented) {
                         if (lys_set_implemented(lys_node_module(next))) {
@@ -6330,7 +6365,18 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
                 if (lys_leaf_add_leafref_target(stype->info.lref.target, (struct lys_node *)stype->parent)) {
                     rc = -1;
                 }
+
+                if (hidden) {
+                    ly_vlog_hide(1);
+                }
+
+                if (rc) {
+                    break;
+                }
             }
+
+            /* check if leafref and its target are under common if-features */
+            rc = check_leafref_features(stype);
         }
 
         break;
@@ -7260,10 +7306,10 @@ check_instid_ext_dep(const struct lys_node *sleaf, const char *json_instid)
 static int
 resolve_instid(struct lyd_node *data, const char *path, int req_inst, struct lyd_node **ret)
 {
-    int i = 0, j;
+    int i = 0, j, parsed, cur_idx;
     const struct lys_module *mod, *prev_mod = NULL;
     struct ly_ctx *ctx = data->schema->module->ctx;
-    struct lyd_node *root;
+    struct lyd_node *root, *node;
     const char *model, *name;
     char *str;
     int mod_len, name_len, has_predicate;
@@ -7294,7 +7340,7 @@ resolve_instid(struct lyd_node *data, const char *path, int req_inst, struct lyd
                 LOGMEM;
                 goto error;
             }
-            mod = ly_ctx_get_module(ctx, str, NULL);
+            mod = ly_ctx_get_module(ctx, str, NULL, 1);
             if (ctx->data_clb) {
                 if (!mod) {
                     mod = ctx->data_clb(ctx, str, NULL, 0, ctx->data_clb_data);
@@ -7323,17 +7369,27 @@ resolve_instid(struct lyd_node *data, const char *path, int req_inst, struct lyd
 
         if (has_predicate) {
             /* we have predicate, so the current results must be list or leaf-list */
-            j = resolve_instid_predicate(mod, &path[i], &node_match);
-            if (j < 1) {
-                LOGVAL(LYE_INPRED, LY_VLOG_LYD, data, &path[i-j]);
-                goto error;
-            }
-            i += j;
+            j = 0;
+            /* index of the current node (for lists with position predicates) */
+            cur_idx = 1;
+            while (j < (signed)node_match.count) {
+                node = node_match.node[j];
+                parsed = resolve_instid_predicate(mod, &path[i], &node, cur_idx);
+                if (parsed < 1) {
+                    LOGVAL(LYE_INPRED, LY_VLOG_LYD, data, &path[i - parsed]);
+                    goto error;
+                }
 
-            if (!node_match.count) {
-                /* no instance exists */
-                break;
+                if (!node) {
+                    /* current node does not satisfy the predicate */
+                    unres_data_del(&node_match, j);
+                } else {
+                    ++j;
+                }
+                ++cur_idx;
             }
+
+            i += parsed;
         } else if (node_match.count) {
             /* check that we are not addressing lists */
             for (j = 0; (unsigned)j < node_match.count; ++j) {

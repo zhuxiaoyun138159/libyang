@@ -626,8 +626,10 @@ struct lys_module {
     uint8_t inc_size;                /**< number of elements in #inc array */
 
     uint16_t ident_size;             /**< number of elements in #ident array */
-    uint8_t tpdf_size;               /**< number of elements in #tpdf array */
+    uint16_t tpdf_size;              /**< number of elements in #tpdf array */
+
     uint8_t features_size;           /**< number of elements in #features array */
+    uint8_t padding[3];              /**< padding for 32b alignment */
 
     uint8_t augment_size;            /**< number of elements in #augment array */
     uint8_t deviation_size;          /**< number of elements in #deviation array */
@@ -686,8 +688,10 @@ struct lys_submodule {
     uint8_t inc_size;                /**< number of elements in #inc array */
 
     uint16_t ident_size;             /**< number of elements in #ident array */
-    uint8_t tpdf_size;               /**< number of elements in #tpdf array */
+    uint16_t tpdf_size;              /**< number of elements in #tpdf array */
+
     uint8_t features_size;           /**< number of elements in #features array */
+    uint8_t padding[3];              /**< padding for 32b alignment */
 
     uint8_t augment_size;            /**< number of elements in #augment array */
     uint8_t deviation_size;          /**< number of elements in #deviation array */
@@ -873,6 +877,11 @@ struct lys_type_info_str {
                                   - 0x15 (NACK) for invert-match
                                   So the expression itself always starts at expr[1] */
     unsigned int pat_count;  /**< number of pattern definitions in the patterns array */
+#ifdef LY_ENABLED_CACHE
+    void **patterns_pcre;    /**< array of compiled patterns to optimize its evaluation, represented as
+                                  array of pointers to results of pcre_compile() and pcre_study().
+                                  For internal use only. */
+#endif
 };
 
 /**
@@ -1167,9 +1176,9 @@ struct lys_node_container {
     uint8_t iffeature_size;          /**< number of elements in the #iffeature array */
 
     /* non compatible 32b with ::lys_node */
-    uint8_t padding[2];              /**< padding for 32b alignment */
+    uint8_t padding[1];              /**< padding for 32b alignment */
     uint8_t must_size;               /**< number of elements in the #must array */
-    uint8_t tpdf_size;               /**< number of elements in the #tpdf array */
+    uint16_t tpdf_size;              /**< number of elements in the #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     struct lys_iffeature *iffeature; /**< array of if-feature expressions */
@@ -1501,8 +1510,7 @@ struct lys_node_grp {
 
     /* non compatible 32b with ::lys_node */
     uint16_t unres_count;            /**< internal counter for unresolved uses, should be always 0 when the module is parsed */
-    uint8_t padding[1];              /**< padding for 32b alignment */
-    uint8_t tpdf_size;               /**< number of elements in #tpdf array */
+    uint16_t tpdf_size;              /**< number of elements in #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     struct lys_iffeature *iffeature; /**< array of if-feature expressions */
@@ -1584,9 +1592,9 @@ struct lys_node_inout {
     uint8_t padding_iffsize;         /**< padding byte for the ::lys_node's iffeature_size */
 
     /* non compatible 32b with ::lys_node */
-    uint8_t padding[2];              /**< padding for 32b alignment */
-    uint8_t tpdf_size;               /**< number of elements in the #tpdf array */
+    uint8_t padding[1];              /**< padding for 32b alignment */
     uint8_t must_size;               /**< number of elements in the #must array */
+    uint16_t tpdf_size;              /**< number of elements in the #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     void* padding_iff;               /**< padding pointer for the ::lys_node's iffeature pointer */
@@ -1623,9 +1631,9 @@ struct lys_node_notif {
     uint8_t iffeature_size;          /**< number of elements in the #iffeature array */
 
     /* non compatible 32b with ::lys_node */
-    uint8_t padding[2];              /**< padding for 32b alignment */
-    uint8_t tpdf_size;               /**< number of elements in the #tpdf array */
+    uint8_t padding[1];              /**< padding for 32b alignment */
     uint8_t must_size;               /**< number of elements in the #must array */
+    uint16_t tpdf_size;              /**< number of elements in the #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     struct lys_iffeature *iffeature; /**< array of if-feature expressions */
@@ -1666,8 +1674,8 @@ struct lys_node_rpc_action {
     uint8_t iffeature_size;          /**< number of elements in the #iffeature array */
 
     /* non compatible 32b with ::lys_node */
-    uint8_t padding[3];              /**< padding for 32b alignment */
-    uint8_t tpdf_size;               /**< number of elements in the #tpdf array */
+    uint8_t padding[2];              /**< padding for 32b alignment */
+    uint16_t tpdf_size;              /**< number of elements in the #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     struct lys_iffeature *iffeature; /**< array of if-feature expressions */
