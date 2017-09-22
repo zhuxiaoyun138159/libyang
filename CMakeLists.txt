@@ -11,7 +11,7 @@ set(CMAKE_MACOSX_RPATH TRUE)
 # set version
 set(LIBYANG_MAJOR_VERSION 0)
 set(LIBYANG_MINOR_VERSION 14)
-set(LIBYANG_MICRO_VERSION 0)
+set(LIBYANG_MICRO_VERSION 1)
 set(LIBYANG_VERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION}.${LIBYANG_MICRO_VERSION})
 set(LIBYANG_SOVERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION})
 
@@ -174,6 +174,7 @@ set(lintsrc
 	tools/lint/main_ni.c
 	tools/lint/commands.c
 	tools/lint/completion.c
+	tools/lint/configuration.c
 	linenoise/linenoise.c)
 
 set(resrc
