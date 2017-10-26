@@ -2013,6 +2013,7 @@ lyd_merge_parent_children(struct lyd_node *target, struct lyd_node *source, int 
                     }
                     break;
                 } else if (ly_errno) {
+                    lyd_free_withsiblings(source);
                     return EXIT_FAILURE;
                 }
             }
@@ -2129,6 +2130,7 @@ lyd_merge_siblings(struct lyd_node *target, struct lyd_node *source, int options
                 }
                 break;
             } else if (ly_errno) {
+                lyd_free_withsiblings(source);
                 return EXIT_FAILURE;
             }
         }
@@ -2375,6 +2377,8 @@ lyd_merge_to_ctx(struct lyd_node **trg, const struct lyd_node *src, int options,
         /* !! src_merge start is a (top-level) sibling(s) of trg_merge_start */
         ret = lyd_merge_siblings(trg_merge_start, src_merge_start, options);
     }
+    /* it was freed whatever the return value */
+    src_merge_start = NULL;
     if (ret) {
         goto error;
     }
@@ -4200,11 +4204,10 @@ lyd_validate(struct lyd_node **node, int options, void *var_arg)
     }
 
     if (*node) {
-        if (options & LYD_OPT_NOSIBLINGS) {
-            /* ctx is NULL */
-        } else {
+        if (!ctx) {
             ctx = (*node)->schema->module->ctx;
-
+        }
+        if (!(options & LYD_OPT_NOSIBLINGS)) {
             /* check that the node is the first sibling */
             while ((*node)->prev->next) {
                 *node = (*node)->prev;
@@ -4323,33 +4326,35 @@ nextsiblings:
         options &= ~LYD_OPT_ACT_NOTIF;
     }
 
-    /* check for uniquness of top-level lists/leaflists because
-     * only the inner instances were tested in lyv_data_content() */
-    set = ly_set_new();
-    yanglib_mod = ly_ctx_get_module(ctx ? ctx : (*node)->schema->module->ctx, "ietf-yang-library", NULL, 1);
-    LY_TREE_FOR(*node, root) {
-        if ((options & LYD_OPT_DATA_ADD_YANGLIB) && yanglib_mod && (root->schema->module == yanglib_mod)) {
-            /* ietf-yang-library data present, so ignore the option to add them */
-            options &= ~LYD_OPT_DATA_ADD_YANGLIB;
-        }
+    if (*node) {
+        /* check for uniqueness of top-level lists/leaflists because
+         * only the inner instances were tested in lyv_data_content() */
+        set = ly_set_new();
+        yanglib_mod = ly_ctx_get_module(ctx ? ctx : (*node)->schema->module->ctx, "ietf-yang-library", NULL, 1);
+        LY_TREE_FOR(*node, root) {
+            if ((options & LYD_OPT_DATA_ADD_YANGLIB) && yanglib_mod && (root->schema->module == yanglib_mod)) {
+                /* ietf-yang-library data present, so ignore the option to add them */
+                options &= ~LYD_OPT_DATA_ADD_YANGLIB;
+            }
 
-        if (!(root->schema->nodetype & (LYS_LIST | LYS_LEAFLIST)) || !(root->validity & LYD_VAL_UNIQUE)) {
-            continue;
-        }
+            if (!(root->schema->nodetype & (LYS_LIST | LYS_LEAFLIST)) || !(root->validity & LYD_VAL_UNIQUE)) {
+                continue;
+            }
 
-        /* check each list/leaflist only once */
-        i = set->number;
-        if (ly_set_add(set, root->schema, 0) != i) {
-            /* already checked */
-            continue;
-        }
+            /* check each list/leaflist only once */
+            i = set->number;
+            if (ly_set_add(set, root->schema, 0) != i) {
+                /* already checked */
+                continue;
+            }
 
-        if (lyv_data_unique(root, *node)) {
-            ly_set_free(set);
-            goto cleanup;
+            if (lyv_data_unique(root, *node)) {
+                ly_set_free(set);
+                goto cleanup;
+            }
         }
+        ly_set_free(set);
     }
-    ly_set_free(set);
 
     /* add missing ietf-yang-library if requested */
     if (options & LYD_OPT_DATA_ADD_YANGLIB) {
@@ -4415,6 +4420,8 @@ repeat:
 
     if (leaf.value_type == LY_TYPE_LEAFREF) {
         if (!sleaf->type.info.lref.target) {
+            /* it should either be unresolved leafref (leaf.value_type are ORed flags) or it will be resolved */
+            LOGINT;
             return EXIT_FAILURE;
         }
         sleaf = sleaf->type.info.lref.target;
@@ -4553,10 +4560,11 @@ lyd_dup_common(struct lyd_node *parent, struct lyd_node *new, const struct lyd_n
     if (ctx) {
         /* we are changing the context, so we have to get the correct schema node in the new context */
         if (parent) {
-            trg_mod = lys_get_import_module(parent->schema->module, NULL, 0, lyd_node_module(orig)->name,
-                                            strlen(lyd_node_module(orig)->name));
+            trg_mod = lyp_get_module(parent->schema->module, NULL, 0, lyd_node_module(orig)->name,
+                                     strlen(lyd_node_module(orig)->name), 1);
             if (!trg_mod) {
-                LOGINT;
+                LOGERR(LY_EINVAL, "Target context does not contain model for the data node being duplicated (%s).",
+                       lyd_node_module(orig)->name);
                 return EXIT_FAILURE;
             }
             /* we know its parent, so we can start with it */
@@ -4669,8 +4677,10 @@ lyd_dup_to_ctx(const struct lyd_node *node, int recursive, struct ly_ctx *ctx)
                 /* in case of duplicating bits (no matter if in the same context or not) or enum and identityref into
                  * a different context, searching for the type and duplicating the data is almost as same as resolving
                  * the string value, so due to a simplicity, parse the value for the duplicated leaf */
-                lyp_parse_value(&((struct lys_node_leaf *)new_leaf->schema)->type, &new_leaf->value_str, NULL,
-                                new_leaf, NULL, 1, node->dflt);
+                if (!lyp_parse_value(&((struct lys_node_leaf *)new_leaf->schema)->type, &new_leaf->value_str, NULL,
+                                     new_leaf, NULL, 1, node->dflt)) {
+                    goto error;
+                }
                 break;
             default:
                 new_leaf->value = ((struct lyd_node_leaf_list *)elem)->value;
@@ -5148,35 +5158,34 @@ end:
 API char *
 lyd_path(const struct lyd_node *node)
 {
-    char *buf_backup = NULL, *buf = ly_buf(), *result = NULL;
-    uint16_t index = LY_BUF_SIZE - 1;
+    char *buf, *result;
+    uint16_t start_idx, len;
 
     if (!node) {
         LOGERR(LY_EINVAL, "%s: NULL node parameter", __func__);
         return NULL;
     }
 
-    /* backup the shared internal buffer */
-    if (ly_buf_used && buf[0]) {
-        buf_backup = strndup(buf, LY_BUF_SIZE - 1);
-    }
-    ly_buf_used++;
+    buf = malloc(LY_BUF_SIZE);
+    LY_CHECK_ERR_RETURN(!buf, LOGMEM, NULL);
+    start_idx = LY_BUF_SIZE - 1;
 
-    /* build the path */
-    buf[index] = '\0';
-    ly_vlog_build_path_reverse(LY_VLOG_LYD, node, buf, &index);
-    result = strdup(&buf[index]);
+    buf[start_idx] = '\0';
+    if (ly_vlog_build_path_reverse(LY_VLOG_LYD, node, &buf, &start_idx, &len, 1)) {
+        free(buf);
+        return NULL;
+    }
+
+    result = malloc(len + 1);
     if (!result) {
         LOGMEM;
-        /* pass through to cleanup */
+        free(buf);
+        return NULL;
     }
 
-    /* restore the shared internal buffer */
-    if (buf_backup) {
-        strncpy(buf, buf_backup, LY_BUF_SIZE - 1);
-        free(buf_backup);
-    }
-    ly_buf_used--;
+    result = memcpy(result, &buf[start_idx], len);
+    result[len] = '\0';
+    free(buf);
 
     return result;
 }
@@ -5332,8 +5341,8 @@ uniquecheck:
                     idx1 = idx2 = LY_BUF_SIZE - 1;
                     path1[idx1] = '\0';
                     path2[idx2] = '\0';
-                    ly_vlog_build_path_reverse(LY_VLOG_LYD, first, path1, &idx1);
-                    ly_vlog_build_path_reverse(LY_VLOG_LYD, second, path2, &idx2);
+                    ly_vlog_build_path_reverse(LY_VLOG_LYD, first, &path1, &idx1, NULL, 0);
+                    ly_vlog_build_path_reverse(LY_VLOG_LYD, second, &path2, &idx2, NULL, 0);
 
                     /* use internal buffer to rebuild the unique string */
                     if (ly_buf_used && uniq_str[0]) {

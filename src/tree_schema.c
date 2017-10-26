@@ -790,7 +790,7 @@ lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys
     }
 
     /* check identifier uniqueness */
-    if (lys_check_id(child, parent, module)) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && lys_check_id(child, parent, module)) {
         return EXIT_FAILURE;
     }
 
@@ -1329,7 +1329,7 @@ lys_iffeature_free(struct ly_ctx *ctx, struct lys_iffeature *iffeature, uint8_t 
 
     for (i = 0; i < iffeature_size; ++i) {
         lys_extension_instances_free(ctx, iffeature[i].ext, iffeature[i].ext_size, private_destructor);
-        if ( !shallow ) {
+        if (!shallow) {
             free(iffeature[i].expr);
             free(iffeature[i].features);
         }
@@ -2533,83 +2533,6 @@ lys_implemented_module(const struct lys_module *mod)
     /* we have no revision of the module implemented, return the module itself,
      * it is up to the caller to set the module implemented when needed */
     return (struct lys_module *)mod;
-}
-
-const struct lys_module *
-lys_get_import_module_ns(const struct lys_module *module, const char *ns)
-{
-    int i;
-
-    assert(module && ns);
-
-    if (module->type) {
-        /* the module is actually submodule and to get the namespace, we need the main module */
-        if (ly_strequal(((struct lys_submodule *)module)->belongsto->ns, ns, 0)) {
-            return ((struct lys_submodule *)module)->belongsto;
-        }
-    } else {
-        /* modul's own namespace */
-        if (ly_strequal(module->ns, ns, 0)) {
-            return module;
-        }
-    }
-
-    /* imported modules */
-    for (i = 0; i < module->imp_size; ++i) {
-        if (ly_strequal(module->imp[i].module->ns, ns, 0)) {
-            return module->imp[i].module;
-        }
-    }
-
-    return NULL;
-}
-
-const struct lys_module *
-lys_get_import_module(const struct lys_module *module, const char *prefix, int pref_len, const char *name, int name_len)
-{
-    const struct lys_module *main_module;
-    char *str;
-    int i;
-
-    assert(!prefix || !name);
-
-    if (prefix && !pref_len) {
-        pref_len = strlen(prefix);
-    }
-    if (name && !name_len) {
-        name_len = strlen(name);
-    }
-
-    main_module = lys_main_module(module);
-
-    /* module own prefix, submodule own prefix, (sub)module own name */
-    if ((!prefix || (!module->type && !strncmp(main_module->prefix, prefix, pref_len) && !main_module->prefix[pref_len])
-                 || (module->type && !strncmp(module->prefix, prefix, pref_len) && !module->prefix[pref_len]))
-            && (!name || (!strncmp(main_module->name, name, name_len) && !main_module->name[name_len]))) {
-        return main_module;
-    }
-
-    /* standard import */
-    for (i = 0; i < module->imp_size; ++i) {
-        if ((!prefix || (!strncmp(module->imp[i].prefix, prefix, pref_len) && !module->imp[i].prefix[pref_len]))
-                && (!name || (!strncmp(module->imp[i].module->name, name, name_len) && !module->imp[i].module->name[name_len]))) {
-            return module->imp[i].module;
-        }
-    }
-
-    /* module required by a foreign grouping, deviation, or submodule */
-    if (name) {
-        str = strndup(name, name_len);
-        if (!str) {
-            LOGMEM;
-            return NULL;
-        }
-        main_module = ly_ctx_get_module(module->ctx, str, NULL, 0);
-        free(str);
-        return main_module;
-    }
-
-    return NULL;
 }
 
 /* free_int_mods - flag whether to free the internal modules as well */
@@ -4589,35 +4512,34 @@ lys_is_key(struct lys_node_list *list, struct lys_node_leaf *leaf)
 API char *
 lys_path(const struct lys_node *node)
 {
-    char *buf_backup = NULL, *buf = ly_buf(), *result = NULL;
-    uint16_t index = LY_BUF_SIZE - 1;
+    char *buf, *result;
+    uint16_t start_idx, len;
 
     if (!node) {
         LOGERR(LY_EINVAL, "%s: NULL node parameter", __func__);
         return NULL;
     }
 
-    /* backup the shared internal buffer */
-    if (ly_buf_used && buf[0]) {
-        buf_backup = strndup(buf, LY_BUF_SIZE - 1);
-    }
-    ly_buf_used++;
+    buf = malloc(LY_BUF_SIZE);
+    LY_CHECK_ERR_RETURN(!buf, LOGMEM, NULL);
+    start_idx = LY_BUF_SIZE - 1;
 
-    /* build the path */
-    buf[index] = '\0';
-    ly_vlog_build_path_reverse(LY_VLOG_LYS, node, buf, &index);
-    result = strdup(&buf[index]);
+    buf[start_idx] = '\0';
+    if (ly_vlog_build_path_reverse(LY_VLOG_LYS, node, &buf, &start_idx, &len, 1)) {
+        free(buf);
+        return NULL;
+    }
+
+    result = malloc(len + 1);
     if (!result) {
         LOGMEM;
-        /* pass through to cleanup */
+        free(buf);
+        return NULL;
     }
 
-    /* restore the shared internal buffer */
-    if (buf_backup) {
-        strcpy(buf, buf_backup);
-        free(buf_backup);
-    }
-    ly_buf_used--;
+    result = memcpy(result, &buf[start_idx], len);
+    result[len] = '\0';
+    free(buf);
 
     return result;
 }

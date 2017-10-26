@@ -26,10 +26,9 @@
 #include <unistd.h>
 
 #include "common.h"
-#include "tree_internal.h"
+#include "parser.h"
 #include "xpath.h"
 #include "context.h"
-#include "libyang.h"
 
 THREAD_LOCAL struct ly_err ly_err_main;
 
@@ -626,7 +625,7 @@ transform_schema2json(const struct lys_module *module, const char *expr)
         if ((exp->tokens[i] == LYXP_TOKEN_NAMETEST) && (end = strnchr(cur_expr, ':', exp->tok_len[i]))) {
             /* get the module */
             pref_len = end - cur_expr;
-            mod = lys_get_import_module(module, cur_expr, pref_len, NULL, 0);
+            mod = lyp_get_module(module, cur_expr, pref_len, NULL, 0, 0);
             if (!mod) {
                 LOGVAL(LYE_INMOD_LEN, LY_VLOG_NONE, NULL, pref_len, cur_expr);
                 goto error;
@@ -652,7 +651,7 @@ transform_schema2json(const struct lys_module *module, const char *expr)
 
             /* get the module */
             pref_len = end - ptr;
-            mod = lys_get_import_module(module, ptr, pref_len, NULL, 0);
+            mod = lyp_get_module(module, ptr, pref_len, NULL, 0, 0);
             if (mod) {
                 /* adjust out size (it can even decrease in some strange cases) */
                 out_size += strlen(mod->name) - pref_len;
@@ -726,7 +725,7 @@ transform_iffeat_schema2json(const struct lys_module *module, const char *expr)
         }
 
         /* get the module */
-        mod = lys_get_import_module(module, id, id_len, NULL, 0);
+        mod = lyp_get_module(module, id, id_len, NULL, 0, 0);
         if (!mod) {
             LOGVAL(LYE_INMOD_LEN, LY_VLOG_NONE, NULL, id_len, id);
             free(out);
@@ -908,6 +907,212 @@ error:
     free(out);
     lyxp_expr_free(exp);
     return NULL;
+}
+
+static int
+ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig_parent, const struct lys_module *cur_mod,
+                           struct lyxp_expr *exp, uint16_t *cur_exp, char **out, uint16_t *out_used)
+{
+    uint16_t j, k, len, slash;
+    char *str = NULL, *col;
+    const struct lys_node *node, *node2, *parent;
+    enum lyxp_token end_token = 0;
+
+    if (exp->tokens[*cur_exp] == LYXP_TOKEN_BRACK1) {
+        end_token = LYXP_TOKEN_BRACK2;
+
+        *out = ly_realloc(*out, *out_used + 1);
+        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+        sprintf(*out + *out_used - 1, "[");
+        *out_used += 1;
+        ++(*cur_exp);
+    }
+
+    parent = orig_parent;
+    while (*cur_exp < exp->used) {
+        switch (exp->tokens[*cur_exp]) {
+        case LYXP_TOKEN_DOT:
+        case LYXP_TOKEN_NAMETEST:
+            str = strndup(exp->expr + exp->expr_pos[*cur_exp], exp->tok_len[*cur_exp]);
+            LY_CHECK_ERR_GOTO(!str, LOGMEM, error);
+
+            col = strchr(str, ':');
+            if (col) {
+                *col = '\0';
+                ++col;
+            }
+
+            /* first node */
+            if (!parent) {
+                if (!col) {
+                    LOGVAL(LYE_PATH_MISSMOD, LY_VLOG_NONE, NULL);
+                    goto error;
+                }
+
+                cur_mod = ly_ctx_get_module(ctx, str, NULL, 0);
+                if (!cur_mod) {
+                    LOGVAL(LYE_XPATH_INMOD, LY_VLOG_NONE, NULL, strlen(str), str);
+                    goto error;
+                }
+            }
+
+            if (((col ? col[0] : str[0]) == '.') || ((col ? col[0] : str[0]) == '*')) {
+                if (end_token) {
+                    LOGERR(LY_EINVAL, "Invalid path used (%s in a subexpression).", str);
+                    goto error;
+                }
+
+                /* path ends, just copy the rest and finish (if it is the first node, it must have had a prefix before) */
+                goto finish;
+            }
+
+            /* create schema path for this data node */
+            node = NULL;
+            while ((node = lys_getnext(node, parent, cur_mod, 0))) {
+                if (strcmp(node->name, col ? col : str)) {
+                    continue;
+                }
+
+                if (col && strcmp(lys_node_module(node)->name, str)) {
+                    continue;
+                }
+                if (!col && (lys_node_module(node) != lys_node_module(parent))) {
+                    continue;
+                }
+
+                /* determine how deep the node actually is, we must generate the path from the highest parent */
+                for (j = 0, node2 = node; node2 != parent; node2 = lys_parent(node2), ++j);
+
+                /* first node, do not print '/' */
+                slash = 0;
+                while (j) {
+                    for (k = j - 1, node2 = node; k; node2 = lys_parent(node2), --k);
+
+                    if ((lys_node_module(node2) != cur_mod) || !parent) {
+                        /* module name and node name */
+                        len = slash + strlen(lys_node_module(node2)->name) + 1 + strlen(node2->name);
+                        *out = ly_realloc(*out, *out_used + len);
+                        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+                        sprintf(*out + *out_used - 1, "%s%s:%s", slash ? "/" : "", lys_node_module(node2)->name, node2->name);
+                        *out_used += len;
+                    } else {
+                        /* only node name */
+                        len = slash + strlen(node2->name);
+                        *out = ly_realloc(*out, *out_used + len);
+                        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+                        sprintf(*out + *out_used - 1, "%s%s", slash ? "/" : "", node2->name);
+                        *out_used += len;
+                    }
+
+                    slash = 1;
+                    --j;
+                }
+
+                break;
+            }
+
+            /* next iteration */
+            free(str);
+            str = NULL;
+            parent = node;
+            break;
+        case LYXP_TOKEN_OPERATOR_PATH:
+            /* just copy it */
+            len = exp->tok_len[*cur_exp];
+            *out = ly_realloc(*out, *out_used + len);
+            LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+            sprintf(*out + *out_used - 1, "%.*s", exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
+            *out_used += len;
+            break;
+        case LYXP_TOKEN_BRACK1:
+            if (ly_path_data2schema_subexp(ctx, parent, cur_mod, exp, cur_exp, out, out_used)) {
+                goto error;
+            }
+            break;
+        case LYXP_TOKEN_OPERATOR_COMP:
+            goto finish;
+        default:
+            if (end_token && (exp->tokens[*cur_exp] == end_token)) {
+                /* we are done */
+                goto finish;
+            }
+            LOGERR(LY_EINVAL, "Invalid token used (%.*s).",
+                   __func__, exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
+            goto error;
+        }
+
+        ++(*cur_exp);
+    }
+
+    if (end_token) {
+        LOGVAL(LYE_XPATH_EOF, LY_VLOG_NONE, NULL);
+        return -1;
+    }
+
+    return 0;
+
+error:
+    free(str);
+    return -1;
+
+finish:
+    if (end_token) {
+        for (j = *cur_exp; (j < exp->used) && (exp->tokens[j] != end_token); ++j);
+        if (j == exp->used) {
+            LOGERR(LY_EINVAL, "Invalid token used (%.*s).",
+                   __func__, exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
+            goto error;
+        }
+
+        len = (exp->expr_pos[j] + exp->tok_len[j]) - exp->expr_pos[*cur_exp];
+        *out = ly_realloc(*out, *out_used + len);
+        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+        sprintf(*out + *out_used - 1, "%.*s", len, exp->expr + exp->expr_pos[*cur_exp]);
+        *out_used += len;
+        *cur_exp = j;
+    } else {
+        len = strlen(exp->expr + exp->expr_pos[*cur_exp]);
+        *out = ly_realloc(*out, *out_used + len);
+        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+        sprintf(*out + *out_used - 1, "%.*s", len, exp->expr + exp->expr_pos[*cur_exp]);
+        *out_used += len;
+        *cur_exp = exp->used - 1;
+    }
+
+    free(str);
+    return 0;
+}
+
+API char *
+ly_path_data2schema(const struct ly_ctx *ctx, const char *data_path)
+{
+    struct lyxp_expr *exp;
+    uint16_t out_used, cur_exp;
+    char *out;
+
+    if (!ctx || !data_path) {
+        LOGERR(LY_EINVAL, "%s: Invalid parameter.", __func__);
+        return NULL;
+    }
+
+    cur_exp = 0;
+    out_used = 1;
+    out = malloc(1);
+    LY_CHECK_ERR_RETURN(!out, LOGMEM, NULL);
+
+    exp = lyxp_parse_expr(data_path);
+    if (!exp) {
+        free(out);
+        return NULL;
+    }
+
+    if (ly_path_data2schema_subexp(ctx, NULL, NULL, exp, &cur_exp, &out, &out_used)) {
+        free(out);
+        out = NULL;
+    }
+
+    lyxp_expr_free(exp);
+    return out;
 }
 
 int
