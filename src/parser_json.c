@@ -1320,7 +1320,6 @@ lyd_parse_json(struct ly_ctx *ctx, const char *data, int options, const struct l
             }
             if (!reply_parent) {
                 LOGERR(LY_EINVAL, "%s: invalid variable parameter (const struct lyd_node *rpc_act).", __func__);
-                lyd_free_withsiblings(reply_top);
                 goto error;
             }
             lyd_free_withsiblings(reply_parent->child);
@@ -1339,14 +1338,12 @@ lyd_parse_json(struct ly_ctx *ctx, const char *data, int options, const struct l
                 len += skip_ws(&data[len]);
                 if (data[len] != ':') {
                     LOGVAL(LYE_XML_INVAL, LY_VLOG_NONE, NULL, "JSON data (missing top-level begin-object)");
-                    lyd_free_withsiblings(reply_top);
                     goto error;
                 }
                 ++len;
                 len += skip_ws(&data[len]);
                 if (data[len] != '{') {
                     LOGVAL(LYE_XML_INVAL, LY_VLOG_NONE, NULL, "JSON data (missing top level yang:action object)");
-                    lyd_free_withsiblings(reply_top);
                     goto error;
                 }
                 ++len;
@@ -1360,23 +1357,29 @@ lyd_parse_json(struct ly_ctx *ctx, const char *data, int options, const struct l
 
         r = json_parse_data(ctx, &data[len], NULL, &next, result, iter, &attrs, options, unres, &act_notif);
         if (!r) {
-            lyd_free_withsiblings(reply_top);
             goto error;
         }
         len += r;
 
         if (!result) {
-            for (iter = next; iter && iter->prev->next; iter = iter->prev);
-            result = iter;
-            if (iter && (options & LYD_OPT_DATA_ADD_YANGLIB) && iter->schema->module == ctx->models.list[ctx->internal_module_count - 1]) {
-                /* ietf-yang-library data present, so ignore the option to add them */
-                options &= ~LYD_OPT_DATA_ADD_YANGLIB;
+            if (reply_parent) {
+                result = next->child;
+                iter = next->child;
+            } else {
+                for (iter = next; iter && iter->prev->next; iter = iter->prev);
+                result = iter;
+                if (iter && (options & LYD_OPT_DATA_ADD_YANGLIB) && iter->schema->module == ctx->models.list[ctx->internal_module_count - 1]) {
+                    /* ietf-yang-library data present, so ignore the option to add them */
+                    options &= ~LYD_OPT_DATA_ADD_YANGLIB;
+                }
+                iter = next;
             }
+        } else {
+            iter = result->prev;
         }
-        if (next) {
-            iter = next;
+        if (!reply_parent) {
+            next = NULL;
         }
-        next = NULL;
     } while (data[len] == ',');
 
     if (data[len] != '}') {
@@ -1468,6 +1471,9 @@ lyd_parse_json(struct ly_ctx *ctx, const char *data, int options, const struct l
 
 error:
     lyd_free_withsiblings(result);
+    if (reply_top && result != reply_top) {
+        lyd_free_withsiblings(reply_top);
+    }
     free(unres->node);
     free(unres->type);
     free(unres);
