@@ -1373,7 +1373,7 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 #ifdef LY_ENABLED_CACHE
             if (!in_grp) {
                 /* do not compile patterns in groupings */
-                type->info.str.patterns_pcre = malloc(2 * i * sizeof *type->info.str.patterns_pcre);
+                type->info.str.patterns_pcre = calloc(2 * i, sizeof *type->info.str.patterns_pcre);
                 LY_CHECK_ERR_GOTO(!type->info.str.patterns_pcre, LOGMEM, error);
             }
 #endif
@@ -3776,7 +3776,7 @@ static int
 read_yin_common(struct lys_module *module, struct lys_node *parent, void *stmt, LYEXT_PAR stmt_type,
                 struct lyxml_elem *xmlnode, int opt, struct unres_schema *unres)
 {
-    struct lys_node *node = stmt;
+    struct lys_node *node = stmt, *p;
     const char *value;
     struct lyxml_elem *sub, *next;
     struct ly_ctx *const ctx = module->ctx;
@@ -3898,7 +3898,14 @@ read_yin_common(struct lys_module *module, struct lys_node *parent, void *stmt, 
          * and fix the schema by inheriting */
         if (!(node->flags & (LYS_STATUS_MASK))) {
             /* status not explicitely specified on the current node -> inherit */
-            str = lys_path(parent);
+            if (stmt_type == LYEXT_PAR_NODE) {
+                p = node->parent;
+                node->parent = parent;
+                str = lys_path(node);
+                node->parent = p;
+            } else {
+                str = lys_path(parent);
+            }
             LOGWRN("Missing status in %s subtree (%s), inheriting.", parent->flags & LYS_STATUS_DEPRC ? "deprecated" : "obsolete", str);
             free(str);
             node->flags |= parent->flags & LYS_STATUS_MASK;
