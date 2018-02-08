@@ -620,7 +620,7 @@ yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_
     int rc, ret = -1;
     unsigned int i, j;
     int8_t req;
-    const char *name, *value;
+    const char *name, *value, *module_name = NULL;
     LY_DATA_TYPE base = 0, base_tmp;
     struct lys_node *siter;
     struct lys_type *dertype;
@@ -643,29 +643,33 @@ yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_
     /* module name */
     name = value;
     if (value[i]) {
-        type->module_name = lydict_insert(module->ctx, value, i);
+        module_name = lydict_insert(module->ctx, value, i);
         name += i;
         if ((name[0] != ':') || (parse_identifier(name + 1) < 1)) {
             LOGVAL(LYE_INCHAR, LY_VLOG_NONE, NULL, name[0], name);
+            lydict_remove(module->ctx, module_name);
             lydict_remove(module->ctx, value);
             goto error;
         }
         ++name;
     }
 
-    rc = resolve_superior_type(name, type->module_name, module, parent, &type->der);
+    rc = resolve_superior_type(name, module_name, module, parent, &type->der);
     if (rc == -1) {
-        LOGVAL(LYE_INMOD, LY_VLOG_NONE, NULL, type->module_name);
+        LOGVAL(LYE_INMOD, LY_VLOG_NONE, NULL, module_name);
+        lydict_remove(module->ctx, module_name);
         lydict_remove(module->ctx, value);
         goto error;
 
     /* the type could not be resolved or it was resolved to an unresolved typedef or leafref */
     } else if (rc == EXIT_FAILURE) {
         LOGVAL(LYE_NORESOLV, LY_VLOG_NONE, NULL, "type", name);
+        lydict_remove(module->ctx, module_name);
         lydict_remove(module->ctx, value);
         ret = EXIT_FAILURE;
         goto error;
     }
+    lydict_remove(module->ctx, module_name);
     lydict_remove(module->ctx, value);
 
     if (type->base == LY_TYPE_ERR) {
@@ -1009,10 +1013,6 @@ yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_
     return EXIT_SUCCESS;
 
 error:
-    if (type->module_name) {
-        lydict_remove(module->ctx, type->module_name);
-        type->module_name = NULL;
-    }
     if (base) {
         type->base = base_tmp;
     }
@@ -2434,7 +2434,7 @@ check_status_flag(struct lys_node *node, struct lys_node *parent)
          * and fix the schema by inheriting */
         if (!(node->flags & (LYS_STATUS_MASK))) {
             /* status not explicitely specified on the current node -> inherit */
-            str = lys_path(node);
+            str = lys_path(node, LYS_PATH_FIRST_PREFIX);
             LOGWRN("Missing status in %s subtree (%s), inheriting.",
                    parent->flags & LYS_STATUS_DEPRC ? "deprecated" : "obsolete", str);
             free(str);
@@ -2606,7 +2606,12 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
 
     ret = yang_parse_mem(module, NULL, unres, data, size, &node);
     if (ret == -1) {
-        free_yang_common(module, node);
+        if (ly_vecode == LYVE_SUBMODULE) {
+            free(module);
+            module = NULL;
+        } else {
+            free_yang_common(module, node);
+        }
         goto error;
     } else if (ret == 1) {
         assert(!unres->count);
@@ -2638,10 +2643,6 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
             goto error;
         }
 
-        /* remove our submodules from the parsed submodules list */
-        lyp_del_includedup(module);
-
-
         if (lyp_rfn_apply_ext(module) || lyp_deviation_apply_ext(module)) {
             goto error;
         }
@@ -2658,6 +2659,9 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
                 goto error;
             }
         }
+
+        /* remove our submodules from the parsed submodules list */
+        lyp_del_includedup(module, 0);
     } else {
         tmp_mod = module;
 
@@ -2666,7 +2670,7 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
         assert(module);
 
         /* free what was parsed */
-        lys_free(tmp_mod, NULL, 0);
+        lys_free(tmp_mod, NULL, 0, 0);
     }
 
     unres_schema_free(NULL, &unres, 0);
@@ -2692,9 +2696,9 @@ error:
     }
 
     lyp_check_circmod_pop(ctx);
-    lyp_del_includedup(module);
     lys_sub_module_remove_devs_augs(module);
-    lys_free(module, NULL, 1);
+    lyp_del_includedup(module, 1);
+    lys_free(module, NULL, 0, 1);
     return NULL;
 }
 
@@ -2736,8 +2740,6 @@ yang_read_submodule(struct lys_module *module, const char *data, unsigned int si
 
 error:
     /* cleanup */
-    unres_schema_free((struct lys_module *)submodule, &unres, 0);
-
     if (!submodule || !submodule->name) {
         free(submodule);
         LOGERR(ly_errno, "Submodule parsing failed.");
@@ -2746,6 +2748,7 @@ error:
 
     LOGERR(ly_errno, "Submodule \"%s\" parsing failed.", submodule->name);
 
+    unres_schema_free((struct lys_module *)submodule, &unres, 0);
     lyp_check_circmod_pop(module->ctx);
     lys_sub_module_remove_devs_augs((struct lys_module *)submodule);
     lys_submodule_module_data_free(submodule);
@@ -2871,9 +2874,7 @@ yang_type_free(struct ly_ctx *ctx, struct lys_type *type)
         type->der = NULL;
     }
     lys_type_free(ctx, type, NULL);
-    type->base = LY_TYPE_DER;
-    type->ext_size = 0;
-    type->ext = NULL;
+    memset(type, 0, sizeof (struct lys_type));
 }
 
 static void
@@ -4436,10 +4437,11 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
         /* unlink and store the original node */
         parent = dev_target->parent;
         lys_node_unlink(dev_target);
-        if (parent && parent->nodetype == LYS_AUGMENT) {
+        if (parent && (parent->nodetype & (LYS_AUGMENT | LYS_USES))) {
             /* hack for augment, because when the original will be sometime reconnected back, we actually need
              * to reconnect it to both - the augment and its target (which is deduced from the deviations target
              * path), so we need to remember the augment as an addition */
+            /* remember uses parent so we can reconnect to it */
             dev_target->parent = parent;
         }
         dev->orig_node = dev_target;
@@ -4496,6 +4498,7 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
             }
         }
         ly_set_free(dflt_check);
+        dflt_check = NULL;
     }
 
     /* mark all the affected modules as deviated and implemented */

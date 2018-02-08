@@ -509,7 +509,7 @@ repeat:
 
     /* the value is here converted to a JSON format if needed in case of LY_TYPE_IDENT and LY_TYPE_INST or to a
      * canonical form of the value */
-    if (!lyp_parse_value(&((struct lys_node_leaf *)leaf->schema)->type, &leaf->value_str, NULL, leaf, NULL, 1, 0)) {
+    if (!lyp_parse_value(&((struct lys_node_leaf *)leaf->schema)->type, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0)) {
         ly_errno = LY_EVALID;
         return 0;
     }
@@ -778,7 +778,8 @@ json_parse_data(struct ly_ctx *ctx, const char *data, const struct lys_node *sch
     unsigned int len = 0;
     unsigned int r;
     unsigned int flag_leaflist = 0;
-    int i, pos;
+    int i;
+    uint8_t pos;
     char *name, *prefix = NULL, *str = NULL;
     const struct lys_module *module = NULL;
     struct lys_node *schema = NULL;
@@ -999,12 +1000,10 @@ attr_repeat:
     result->schema = schema;
     result->parent = *parent;
     diter = NULL;
-    if (*parent && (*parent)->child && schema->nodetype == LYS_LEAF && (*parent)->schema->nodetype == LYS_LIST &&
-        (pos = lys_is_key((struct lys_node_list *)(*parent)->schema, (struct lys_node_leaf *)schema))) {
+    if (schema->nodetype == LYS_LEAF && lys_is_key((struct lys_node_leaf *)schema, &pos)) {
         /* it is key and we need to insert it into a correct place */
         for (i = 0, diter = (*parent)->child;
-                diter && i < (pos - 1) && diter->schema->nodetype == LYS_LEAF &&
-                    lys_is_key((struct lys_node_list *)(*parent)->schema, (struct lys_node_leaf *)diter->schema);
+                diter && i < pos && diter->schema->nodetype == LYS_LEAF && lys_is_key((struct lys_node_leaf *)diter->schema, NULL);
                 i++, diter = diter->next);
         if (diter) {
             /* out of order insertion - insert list's key to the correct position, before the diter */
@@ -1287,6 +1286,7 @@ lyd_parse_json(struct ly_ctx *ctx, const char *data, int options, const struct l
 
     /* no data (or whitespaces only) are fine */
     if (!data[len]) {
+empty:
         if (options & LYD_OPT_DATA_ADD_YANGLIB) {
             result = ly_ctx_info(ctx);
         }
@@ -1298,6 +1298,13 @@ lyd_parse_json(struct ly_ctx *ctx, const char *data, int options, const struct l
     if (data[len] != '{') {
         LOGVAL(LYE_XML_INVAL, LY_VLOG_NONE, NULL, "JSON data (missing top level begin-object)");
         return NULL;
+    }
+
+    /* check for empty object */
+    r = len + 1;
+    r += skip_ws(&data[r]);
+    if (data[r] == '}') {
+        goto empty;
     }
 
     unres = calloc(1, sizeof *unres);

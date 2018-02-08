@@ -10,8 +10,8 @@ set(CMAKE_MACOSX_RPATH TRUE)
 
 # set version
 set(LIBYANG_MAJOR_VERSION 0)
-set(LIBYANG_MINOR_VERSION 14)
-set(LIBYANG_MICRO_VERSION 28)
+set(LIBYANG_MINOR_VERSION 15)
+set(LIBYANG_MICRO_VERSION 16)
 set(LIBYANG_VERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION}.${LIBYANG_MICRO_VERSION})
 set(LIBYANG_SOVERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION})
 
@@ -33,6 +33,7 @@ else()
     option(ENABLE_BUILD_TESTS "Build tests" OFF)
     option(ENABLE_VALGRIND_TESTS "Build tests with valgrind" OFF)
 endif()
+option(ENABLE_CALLGRIND_TESTS "Build performance tests to be run with callgrind" OFF)
 option(ENABLE_LATEST_REVISIONS "Enable reusing of latest revisions of schemas" ON)
 option(ENABLE_CACHE "Enable data caching for schemas (time-efficient at the cost of increased space-complexity)" OFF)
 

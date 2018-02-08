@@ -261,6 +261,7 @@ xml_print_leaf(struct lyout *out, int level, const struct lyd_node *node, int to
 {
     const struct lyd_node_leaf_list *leaf = (struct lyd_node_leaf_list *)node, *iter;
     const struct lys_type *type;
+    struct lys_tpdf *tpdf;
     const char *ns, *mod_name;
     const char **prefs, **nss;
     const char *xml_expr;
@@ -287,8 +288,24 @@ xml_print_leaf(struct lyout *out, int level, const struct lyd_node *node, int to
     datatype = leaf->value_type & LY_DATA_TYPE_MASK;
 printvalue:
     switch (datatype) {
-    case LY_TYPE_BINARY:
     case LY_TYPE_STRING:
+        type = lyd_leaf_type((struct lyd_node_leaf_list *)leaf);
+        if (!type) {
+            /* error */
+            ly_print(out, "\"(!error!)\"");
+            return EXIT_FAILURE;
+        }
+        for (tpdf = type->der;
+             tpdf->module && (strcmp(tpdf->name, "xpath1.0") || strcmp(tpdf->module->name, "ietf-yang-types"));
+             tpdf = tpdf->type.der);
+        /* special handling of ietf-yang-types xpath1.0 */
+        if (tpdf->module) {
+            /* avoid code duplication - use instance-identifier printer which gets necessary namespaces to print */
+            datatype = LY_TYPE_INST;
+            goto printvalue;
+        }
+        /* fallthrough */
+    case LY_TYPE_BINARY:
     case LY_TYPE_BITS:
     case LY_TYPE_ENUM:
     case LY_TYPE_BOOL:
@@ -499,6 +516,12 @@ xml_print_anydata(struct lyout *out, int level, const struct lyd_node *node, int
         /* no content */
         ly_print(out, "/>%s", level ? "\n" : "");
     } else {
+        if (any->value_type == LYD_ANYDATA_DATATREE) {
+            /* print namespaces in the anydata data tree */
+            LY_TREE_FOR(any->value.tree, iter) {
+                xml_print_ns(out, iter, options);
+            }
+        }
         /* close opening tag ... */
         ly_print(out, ">");
         /* ... and print anydata content */

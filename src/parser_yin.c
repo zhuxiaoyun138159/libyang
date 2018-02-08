@@ -516,7 +516,7 @@ int
 fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_elem *yin, struct lys_type *type,
               int parenttype, struct unres_schema *unres)
 {
-    const char *value, *name;
+    const char *value, *name, *module_name = NULL;
     struct lys_node *siter;
     struct lyxml_elem *next, *next2, *node, *child, exts;
     struct lys_restr **restrs, *restr;
@@ -550,10 +550,11 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     /* module name */
     name = value;
     if (value[i]) {
-        type->module_name = lydict_insert(module->ctx, value, i);
+        module_name = lydict_insert(module->ctx, value, i);
         name += i;
         if ((name[0] != ':') || (parse_identifier(name + 1) < 1)) {
             LOGVAL(LYE_INCHAR, LY_VLOG_NONE, NULL, name[0], name);
+            lydict_remove(module->ctx, module_name);
             lydict_remove(module->ctx, value);
             goto error;
         }
@@ -561,19 +562,22 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
         ++name;
     }
 
-    rc = resolve_superior_type(name, type->module_name, module, parent, &type->der);
+    rc = resolve_superior_type(name, module_name, module, parent, &type->der);
     if (rc == -1) {
-        LOGVAL(LYE_INMOD, LY_VLOG_NONE, NULL, type->module_name);
+        LOGVAL(LYE_INMOD, LY_VLOG_NONE, NULL, module_name);
+        lydict_remove(module->ctx, module_name);
         lydict_remove(module->ctx, value);
         goto error;
 
     /* the type could not be resolved or it was resolved to an unresolved typedef */
     } else if (rc == EXIT_FAILURE) {
         LOGVAL(LYE_NORESOLV, LY_VLOG_NONE, NULL, "type", name);
+        lydict_remove(module->ctx, module_name);
         lydict_remove(module->ctx, value);
         ret = EXIT_FAILURE;
         goto error;
     }
+    lydict_remove(module->ctx, module_name);
     lydict_remove(module->ctx, value);
 
     if (type->base == LY_TYPE_ERR) {
@@ -1541,10 +1545,6 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     return EXIT_SUCCESS;
 
 error:
-    if (type->module_name) {
-        lydict_remove(module->ctx, type->module_name);
-        type->module_name = NULL;
-    }
     lyxml_free_withsiblings(module->ctx, exts.child);
 
     return ret;
@@ -2244,10 +2244,11 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
             /* unlink and store the original node */
             parent = dev_target->parent;
             lys_node_unlink(dev_target);
-            if (parent && parent->nodetype == LYS_AUGMENT) {
+            if (parent && (parent->nodetype & (LYS_AUGMENT | LYS_USES))) {
                 /* hack for augment, because when the original will be sometime reconnected back, we actually need
                  * to reconnect it to both - the augment and its target (which is deduced from the deviations target
                  * path), so we need to remember the augment as an addition */
+                /* remember uses parent so we can reconnect to it */
                 dev_target->parent = parent;
             }
             dev->orig_node = dev_target;
@@ -2502,8 +2503,10 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
 
                 /* replace */
                 lys_type_free(ctx, t, NULL);
+                memset(t, 0, sizeof (struct lys_type));
                 /* HACK for unres */
                 t->der = (struct lys_tpdf *)child;
+                t->parent = (struct lys_tpdf *)dev_target;
                 if (unres_schema_add_node(module, unres, t, UNRES_TYPE_DER, dev_target) == -1) {
                     goto error;
                 }
@@ -3901,10 +3904,10 @@ read_yin_common(struct lys_module *module, struct lys_node *parent, void *stmt, 
             if (stmt_type == LYEXT_PAR_NODE) {
                 p = node->parent;
                 node->parent = parent;
-                str = lys_path(node);
+                str = lys_path(node, LYS_PATH_FIRST_PREFIX);
                 node->parent = p;
             } else {
-                str = lys_path(parent);
+                str = lys_path(parent, LYS_PATH_FIRST_PREFIX);
             }
             LOGWRN("Missing status in %s subtree (%s), inheriting.", parent->flags & LYS_STATUS_DEPRC ? "deprecated" : "obsolete", str);
             free(str);
@@ -7136,9 +7139,7 @@ yin_read_submodule(struct lys_module *module, const char *data, struct unres_sch
 
 error:
     /* cleanup */
-    unres_schema_free((struct lys_module *)submodule, &unres, 0);
     lyxml_free(module->ctx, yin);
-
     if (!submodule) {
         LOGERR(ly_errno, "Submodule parsing failed.");
         return NULL;
@@ -7146,6 +7147,7 @@ error:
 
     LOGERR(ly_errno, "Submodule \"%s\" parsing failed.", submodule->name);
 
+    unres_schema_free((struct lys_module *)submodule, &unres, 0);
     lyp_check_circmod_pop(module->ctx);
     lys_sub_module_remove_devs_augs((struct lys_module *)submodule);
     lys_submodule_module_data_free(submodule);
@@ -7211,9 +7213,6 @@ yin_read_module_(struct ly_ctx *ctx, struct lyxml_elem *yin, const char *revisio
         if (lyp_check_include_missing(module)) {
             goto error;
         }
-
-        /* remove our submodules from the parsed submodules list */
-        lyp_del_includedup(module);
     }
 
     lyp_sort_revisions(module);
@@ -7245,9 +7244,12 @@ yin_read_module_(struct ly_ctx *ctx, struct lyxml_elem *yin, const char *revisio
         if (lyp_ctx_add_module(module)) {
             goto error;
         }
+
+        /* remove our submodules from the parsed submodules list */
+        lyp_del_includedup(module, 0);
     } else {
         /* free what was parsed */
-        lys_free(module, NULL, 0);
+        lys_free(module, NULL, 0, 0);
 
         /* get the model from the context */
         module = (struct lys_module *)ly_ctx_get_module(ctx, value, revision, 0);
@@ -7274,9 +7276,9 @@ error:
     LOGERR(ly_errno, "Module \"%s\" parsing failed.", module->name);
 
     lyp_check_circmod_pop(ctx);
-    lyp_del_includedup(module);
     lys_sub_module_remove_devs_augs(module);
-    lys_free(module, NULL, 1);
+    lyp_del_includedup(module, 1);
+    lys_free(module, NULL, 0, 1);
     return NULL;
 }
 

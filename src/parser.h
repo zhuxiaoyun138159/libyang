@@ -104,7 +104,8 @@ int lyp_fill_attr(struct ly_ctx *ctx, struct lyd_node *parent, const char *modul
 int lyp_check_edit_attr(struct ly_ctx *ctx, struct lyd_attr *attr, struct lyd_node *parent, int *editbits);
 
 struct lys_type *lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *xml,
-                                struct lyd_node_leaf_list *leaf, struct lyd_attr *attr, int store, int dflt);
+                                 struct lyd_node_leaf_list *leaf, struct lyd_attr *attr, struct lys_module *local_mod,
+                                 int store, int dflt);
 
 int lyp_check_length_range(const char *expr, struct lys_type *type);
 
@@ -118,7 +119,7 @@ int lyp_check_status(uint16_t flags1, struct lys_module *mod1, const char *name1
                      uint16_t flags2, struct lys_module *mod2, const char *name2,
                      const struct lys_node *node);
 
-void lyp_del_includedup(struct lys_module *mod);
+void lyp_del_includedup(struct lys_module *mod, int free_subs);
 
 int dup_typedef_check(const char *type, struct lys_tpdf *tpdf, int size);
 

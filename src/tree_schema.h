@@ -189,9 +189,16 @@ typedef enum {
     LYS_OUT_YANG = 1,    /**< YANG schema output format */
     LYS_OUT_YIN = 2,     /**< YIN schema output format */
     LYS_OUT_TREE,        /**< Tree schema output format, for more information see the [printers](@ref howtoschemasprinters) page */
-    LYS_OUT_TREE_GRPS,   /**< Tree schema output format with printing groupings */
     LYS_OUT_INFO,        /**< Info schema output format, for more information see the [printers](@ref howtoschemasprinters) page */
 } LYS_OUTFORMAT;
+
+/**
+ * @brief Schema output options accepted by libyang [printer functions](@ref howtoschemasprinters).
+ */
+#define LYS_OUTOPT_TREE_RFC        0x01 /**< Conform to the RFC TODO tree output */
+#define LYS_OUTOPT_TREE_GROUPING   0x02 /**< Print groupings separately */
+#define LYS_OUTOPT_TREE_USES       0x04 /**< Print only uses instead the resolved grouping nodes */
+#define LYS_OUTOPT_TREE_NO_LEAFREF 0x08 /**< Do not print the target of leafrefs */
 
 /* shortcuts for common in and out formats */
 #define LYS_YANG 1       /**< YANG schema format, used for #LYS_INFORMAT and #LYS_OUTFORMAT */
@@ -915,7 +922,6 @@ union lys_type_info {
  * @brief YANG type structure providing information from the schema
  */
 struct lys_type {
-    const char *module_name;         /**< module name of the type referenced in der pointer*/
     LY_DATA_TYPE base;               /**< base type */
     uint8_t ext_size;                /**< number of elements in #ext array */
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
@@ -1030,46 +1036,46 @@ struct lys_iffeature {
  *     4 - leaflist     9 - rpc               14 - augment      19 - extension
  *     5 - list        10 - input             15 - feature
  *
- *                                           1 1 1 1 1 1 1 1 1 1
- *                         1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9
- *     -------------------+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     1 LYS_USESGRP      | | | | | | | | | | | | |x| | | | | | |
- *       LYS_AUTOASSIGNED | | | | | | | | | | | | | | | |x| | | |
- *       LYS_CONFIG_W     |x|x|x|x|x|x|x| | | | | | | | | | |x| |
- *       LYS_NOTAPPLIED   | | | | | | | | | | | | | |x| | | | | |
- *       LYS_YINELEM      | | | | | | | | | | | | | | | | | | |x|
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     2 LYS_CONFIG_R     |x|x|x|x|x|x|x| | | | | | | | | | |x| |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     3 LYS_CONFIG_SET   |x|x|x|x|x|x| | | | | | | | | | | | | |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     4 LYS_STATUS_CURR  |x|x|x|x|x|x|x|x|x| | |x|x|x|x|x|x| |x|
- *       LYS_RFN_MAXSET   | | | | | | | | | | | | | | | | | |x| |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     5 LYS_STATUS_DEPRC |x|x|x|x|x|x|x|x|x| | |x|x|x|x|x|x| |x|
- *       LYS_RFN_MINSET   | | | | | | | | | | | | | | | | | |x| |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     6 LYS_STATUS_OBSLT |x|x|x|x|x|x|x|x|x| | |x|x|x|x|x|x| |x|
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     7 LYS_MAND_TRUE    | |x|x| | |x| | | | | | | | | | | |x| |
- *       LYS_IMPLICIT     | | | | | | |x| | |x|x| | | | | | | | |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     8 LYS_MAND_FALSE   | |x|x| | |x| | | | | | | | | | | |x| |
- *       LYS_INCL_STATUS  |x| | | |x| | | | | | | | | | | | | | |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *     9 LYS_USERORDERED  | | | |x|x| | | | | | | | | | | | |r| |
- *       LYS_UNIQUE       | | |x| | | | | | | | | | | | | | |r| |
- *       LYS_FENABLED     | | | | | | | | | | | | | | |x| | |r| |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *    10 LYS_XPATH_DEP    |x|x|x|x|x|x|x|x|x|x|x| |x|x| | | |r| |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *    11 LYS_LEAFREF_DEP  |x|x|x|x|x|x|x|x|x|x|x| |x|x| | | |r| |
- *                        +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *    12 LYS_DFLTJSON     | | |x|x| | | | | | | | | | | |x| |r| |
- *    --------------------+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *                                            1 1 1 1 1 1 1 1 1 1
+ *                          1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9
+ *     --------------------+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      1 LYS_USESGRP      | | | | | | | | | | | | |x| | | | | | |
+ *        LYS_AUTOASSIGNED | | | | | | | | | | | | | | | |x| | | |
+ *        LYS_CONFIG_W     |x|x|x|x|x|x|x| | | | | | | | | | |x| |
+ *        LYS_NOTAPPLIED   | | | | | | | | | | | | | |x| | | | | |
+ *        LYS_YINELEM      | | | | | | | | | | | | | | | | | | |x|
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      2 LYS_CONFIG_R     |x|x|x|x|x|x|x| | | | | | | | | | |x| |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      3 LYS_CONFIG_SET   |x|x|x|x|x|x| | | | | | | | | | | | | |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      4 LYS_STATUS_CURR  |x|x|x|x|x|x|x|x|x| | |x|x|x|x|x|x| |x|
+ *        LYS_RFN_MAXSET   | | | | | | | | | | | | | | | | | |x| |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      5 LYS_STATUS_DEPRC |x|x|x|x|x|x|x|x|x| | |x|x|x|x|x|x| |x|
+ *        LYS_RFN_MINSET   | | | | | | | | | | | | | | | | | |x| |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      6 LYS_STATUS_OBSLT |x|x|x|x|x|x|x|x|x| | |x|x|x|x|x|x| |x|
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      7 LYS_MAND_TRUE    | |x|x| | |x| | | | | | | | | | | |x| |
+ *        LYS_IMPLICIT     | | | | | | |x| | |x|x| | | | | | | | |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      8 LYS_MAND_FALSE   | |x|x| | |x| | | | | | | | | | | |x| |
+ *        LYS_INCL_STATUS  |x| | | |x| | | | | | | | | | | | | | |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *      9 LYS_USERORDERED  | | | |x|x| | | | | | | | | | | | |r| |
+ *        LYS_UNIQUE       | | |x| | | | | | | | | | | | | | |r| |
+ *        LYS_FENABLED     | | | | | | | | | | | | | | |x| | |r| |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *     10 LYS_XPATH_DEP    |x|x|x|x|x|x|x|x|x|x|x| |x|x| | | |r| |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *     11 LYS_LEAFREF_DEP  |x|x|x|x|x|x|x|x|x|x|x| |x|x| | | |r| |
+ *                         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *     12 LYS_DFLTJSON     | | |x|x| | | | | | | | | | | |x| |r| |
+ *     --------------------+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  *
- *    x - used
- *    r - reserved for internal use
+ *     x - used
+ *     r - reserved for internal use
  * @{
  */
 #define LYS_CONFIG_W     0x01        /**< config true; */
@@ -1507,14 +1513,14 @@ struct lys_node_grp {
     const char *ref;                 /**< reference statement (optional) */
     uint16_t flags;                  /**< [schema node flags](@ref snodeflags) - only LYS_STATUS_* values are allowed */
     uint8_t ext_size;                /**< number of elements in #ext array */
-    uint8_t iffeature_size;          /**< number of elements in the #iffeature array */
+    uint8_t padding_iffsize;         /**< padding byte for the ::lys_node's iffeature_size */
 
     /* non compatible 32b with ::lys_node */
     uint16_t unres_count;            /**< internal counter for unresolved uses, should be always 0 when the module is parsed */
     uint16_t tpdf_size;              /**< number of elements in #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
-    struct lys_iffeature *iffeature; /**< array of if-feature expressions */
+    void *padding_iff;               /**< padding pointer for the ::lys_node's iffeature pointer */
     struct lys_module *module;       /**< pointer to the node's module (mandatory) */
 
     LYS_NODE nodetype;               /**< type of the node (mandatory) - #LYS_GROUPING */
@@ -1598,7 +1604,7 @@ struct lys_node_inout {
     uint16_t tpdf_size;              /**< number of elements in the #tpdf array */
 
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
-    void* padding_iff;               /**< padding pointer for the ::lys_node's iffeature pointer */
+    void *padding_iff;               /**< padding pointer for the ::lys_node's iffeature pointer */
     struct lys_module *module;       /**< link to the node's data model */
 
     LYS_NODE nodetype;               /**< type of the node (mandatory) - #LYS_INPUT or #LYS_OUTPUT */
@@ -2090,6 +2096,15 @@ int lys_features_state(const struct lys_module *module, const char *feature);
 const struct lys_node *lys_is_disabled(const struct lys_node *node, int recursive);
 
 /**
+ * @brief Check if the schema leaf node is used as a key for a list.
+ *
+ * @param[in] node Schema leaf node to check
+ * @param[out] index Optional parameter to return position in the list's keys array.
+ * @return NULL if the \p node is not a key, pointer to the list if the \p node is the key of this list
+ */
+const struct lys_node_list *lys_is_key(const struct lys_node_leaf *node, uint8_t *index);
+
+/**
  * @brief Get next schema tree (sibling) node element that can be instantiated in a data tree. Returned node can
  * be from an augment.
  *
@@ -2178,11 +2193,20 @@ struct ly_set *lys_node_xpath_atomize(const struct lys_node *node, int options);
 
 /**
  * @brief Build schema path (usable as path, see @ref howtoxpath) of the schema node.
+ *
+ * The path includes prefixes of all the nodes and is hence unequivocal in any context.
+ * Options can be specified to use a different format of the path.
+ *
  * @param[in] node Schema node to be processed.
+ * @param[in] options Additional path modification options (#LYS_PATH_FIRST_PREFIX).
  * @return NULL on error, on success the buffer for the resulting path is allocated and caller is supposed to free it
  * with free().
  */
-char *lys_path(const struct lys_node *node);
+char *lys_path(const struct lys_node *node, int options);
+
+#define LYS_PATH_FIRST_PREFIX 0x01 /**< lys_path() option for the path not to include prefixes of all the nodes,
+ * but only for the first one that will be interpreted as the current module (more at @ref howtoxpath). This path is
+ * less suitable for further processing but better for displaying as it is shorter. */
 
 /**
  * @brief Build data path (usable as path, see @ref howtoxpath) of the schema node.
@@ -2310,63 +2334,66 @@ int lys_set_enabled(const struct lys_module *module);
 void *lys_set_private(const struct lys_node *node, void *priv);
 
 /**
- * @brief Print schema tree in the specified format.
- *
- * Same as lys_print(),  but it allocates memory and store the data into it.
+ * @brief Print schema tree in the specified format into a memory block.
  * It is up to caller to free the returned string by free().
  *
  * @param[out] strp Pointer to store the resulting dump.
  * @param[in] module Schema tree to print.
  * @param[in] format Schema output format.
- * @param[in] target_node Optional parameter for ::LYS_OUT_INFO format. It specifies which particular
- * node in the module will be printed.
+ * @param[in] target_node Optional parameter. It specifies which particular node/subtree in the module will be printed.
+ * Use fully qualified schema path (@ref howtoxpath).
+ * @param[in] line_length Maximum characters to be printed on a line. 0 for unlimited.
+ * @param[in] options Schema output options.
  * @return 0 on success, 1 on failure (#ly_errno is set).
  */
-int lys_print_mem(char **strp, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node);
+int lys_print_mem(char **strp, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
+                  int line_length, int options);
 
 /**
- * @brief Print schema tree in the specified format.
- *
- * Same as lys_print(), but output is written into the specified file descriptor.
+ * @brief Print schema tree in the specified format into a file descriptor.
  *
  * @param[in] module Schema tree to print.
  * @param[in] fd File descriptor where to print the data.
  * @param[in] format Schema output format.
- * @param[in] target_node Optional parameter for ::LYS_OUT_INFO format. It specifies which particular
- * node in the module will be printed.
+ * @param[in] target_node Optional parameter. It specifies which particular node/subtree in the module will be printed.
+ * Use fully qualified schema path (@ref howtoxpath).
+ * @param[in] line_length Maximum characters to be printed on a line. 0 for unlimited.
+ * @param[in] options Schema output options.
  * @return 0 on success, 1 on failure (#ly_errno is set).
  */
-int lys_print_fd(int fd, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node);
+int lys_print_fd(int fd, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
+                 int line_length, int options);
 
 /**
- * @brief Print schema tree in the specified format.
- *
- * To write data into a file descriptor, use lys_print_fd().
+ * @brief Print schema tree in the specified format into a file stream.
  *
  * @param[in] module Schema tree to print.
  * @param[in] f File stream where to print the schema.
  * @param[in] format Schema output format.
- * @param[in] target_node Optional parameter for ::LYS_OUT_INFO format. It specifies which particular
- * node in the module will be printed.
+ * @param[in] target_node Optional parameter. It specifies which particular node/subtree in the module will be printed.
+ * Use fully qualified schema path (@ref howtoxpath).
+ * @param[in] line_length Maximum characters to be printed on a line. 0 for unlimited.
+ * @param[in] options Schema output options.
  * @return 0 on success, 1 on failure (#ly_errno is set).
  */
-int lys_print_file(FILE *f, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node);
+int lys_print_file(FILE *f, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
+                   int line_length, int options);
 
 /**
- * @brief Print schema tree in the specified format.
- *
- * Same as lys_print(), but output is written via provided callback.
+ * @brief Print schema tree in the specified format using a provided callback.
  *
  * @param[in] module Schema tree to print.
  * @param[in] writeclb Callback function to write the data (see write(1)).
  * @param[in] arg Optional caller-specific argument to be passed to the \p writeclb callback.
  * @param[in] format Schema output format.
- * @param[in] target_node Optional parameter for ::LYS_OUT_INFO format. It specifies which particular
- * node in the module will be printed.
+ * @param[in] target_node Optional parameter. It specifies which particular node/subtree in the module will be printed.
+ * Use fully qualified schema path (@ref howtoxpath).
+ * @param[in] line_length Maximum characters to be printed on a line. 0 for unlimited.
+ * @param[in] options Schema output options.
  * @return 0 on success, 1 on failure (#ly_errno is set).
  */
 int lys_print_clb(ssize_t (*writeclb)(void *arg, const void *buf, size_t count), void *arg,
-                  const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node);
+                  const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node, int line_length, int options);
 
 /**@} */
 

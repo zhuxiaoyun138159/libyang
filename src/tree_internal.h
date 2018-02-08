@@ -175,6 +175,14 @@ int lys_check_xpath(struct lys_node *node, int check_place);
 int lys_has_xpath(const struct lys_node *node);
 
 /**
+ * @brief Learn if \p type is defined in the local module or from an import.
+ *
+ * @param[in] type Type to examine.
+ * @return non-zero if local, 0 if from an import.
+ */
+int lys_type_is_local(const struct lys_type *type);
+
+/**
  * @brief Create a copy of the specified schema tree \p node
  *
  * @param[in] module Target module for the duplicated node.
@@ -303,10 +311,12 @@ void lys_node_free(struct lys_node *node, void (*private_destructor)(const struc
  * @param[in] module Data model to free.
  * @param[in] private_destructor Optional destructor function for private objects assigned
  * to the nodes via lys_set_private(). If NULL, the private objects are not freed by libyang.
+ * @param[in] free_subs Whether to free included submodules.
  * @param[in] remove_from_ctx Whether to remove this model from context. Always use 1 except
  * when removing all the models (in ly_ctx_destroy()).
  */
-void lys_free(struct lys_module *module, void (*private_destructor)(const struct lys_node *node, void *priv), int remove_from_ctx);
+void lys_free(struct lys_module *module, void (*private_destructor)(const struct lys_node *node, void *priv),
+              int free_subs, int remove_from_ctx);
 
 /**
  * @brief Create a data container knowing it's schema node.
@@ -479,14 +489,10 @@ void lys_submodule_module_data_free(struct lys_submodule *submodule);
 int lys_copy_union_leafrefs(struct lys_module *mod, struct lys_node *parent, struct lys_type *type,
                             struct lys_type *prev_new, struct unres_schema *unres);
 
-const struct lys_module *lys_parse_mem_(struct ly_ctx *ctx, const char *data, LYS_INFORMAT format, int internal,
-                                        int implement);
+const struct lys_module *lys_parse_fd_(struct ly_ctx *ctx, int fd, LYS_INFORMAT format, const char *revision, int implement);
 
-/**
- * @brief Get know if the \p leaf is a key of the \p list
- * @return 0 for false, position of the key otherwise
- */
-int lys_is_key(struct lys_node_list *list, struct lys_node_leaf *leaf);
+const struct lys_module *lys_parse_mem_(struct ly_ctx *ctx, const char *data, LYS_INFORMAT format, const char *revision,
+                                        int internal, int implement);
 
 /**
  * @brief Get next augment from \p mod augmenting \p aug_target

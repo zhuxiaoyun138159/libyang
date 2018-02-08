@@ -406,60 +406,6 @@ lyp_add_ietf_netconf_annotations(struct lys_module *mod)
     return EXIT_SUCCESS;
 }
 
-/**
- * @brief Alternative for lys_read() + lys_parse() in case of import
- *
- * @param[in] fd MUST be a regular file (will be used by mmap)
- */
-struct lys_module *
-lys_read_import(struct ly_ctx *ctx, int fd, LYS_INFORMAT format, const char *revision, int implement)
-{
-    struct lys_module *module = NULL;
-    size_t length;
-    char *addr;
-
-    if (!ctx || fd < 0) {
-        LOGERR(LY_EINVAL, "%s: Invalid parameter.", __func__);
-        return NULL;
-    }
-
-    addr = lyp_mmap(fd, 1, &length);
-    if (addr == MAP_FAILED) {
-        LOGERR(LY_ESYS, "Mapping file descriptor into memory failed (%s()).", __func__);
-        return NULL;
-    } else if (!addr) {
-        LOGERR(LY_EINVAL, "Empty schema file.");
-        return NULL;
-    }
-
-    switch (format) {
-    case LYS_IN_YIN:
-        module = yin_read_module(ctx, addr, revision, implement);
-        break;
-    case LYS_IN_YANG:
-        module = yang_read_module(ctx, addr, length, revision, implement);
-        break;
-    default:
-        LOGERR(LY_EINVAL, "%s: Invalid format parameter.", __func__);
-        break;
-    }
-    lyp_munmap(addr, length);
-
-    /* hack for NETCONF's edit-config's operation attribute. It is not defined in the schema, but since libyang
-     * implements YANG metadata (annotations), we need its definition. Because the ietf-netconf schema is not the
-     * internal part of libyang, we cannot add the annotation into the schema source, but we do it here to have
-     * the anotation definitions available in the internal schema structure. There is another hack in schema
-     * printers to do not print this internally added annotation. */
-    if (module && ly_strequal(module->name, "ietf-netconf", 0)) {
-        if (lyp_add_ietf_netconf_annotations(module)) {
-            lys_free(module, NULL, 1);
-            return NULL;
-        }
-    }
-
-    return module;
-}
-
 /* if module is !NULL, then the function searches for submodule */
 struct lys_module *
 lyp_search_file(struct ly_ctx *ctx, struct lys_module *module, const char *name, const char *revision,
@@ -681,7 +627,7 @@ matched:
     if (module) {
         result = (struct lys_module *)lys_sub_parse_fd(module, fd, match_format, unres);
     } else {
-        result = lys_read_import(ctx, fd, match_format, revision, implement);
+        result = (struct lys_module *)lys_parse_fd_(ctx, fd, match_format, revision, implement);
     }
     close(fd);
 
@@ -1157,9 +1103,9 @@ error:
 int
 lyp_check_pattern(const char *pattern, pcre **pcre_precomp)
 {
-    int idx, start, end, err_offset;
+    int idx, start, end, err_offset, dol_count;
     char *perl_regex, *ptr;
-    const char *err_msg;
+    const char *err_msg, *orig_ptr;
     pcre *precomp;
 
     /*
@@ -1167,11 +1113,36 @@ lyp_check_pattern(const char *pattern, pcre **pcre_precomp)
      *
      * http://www.w3.org/TR/2004/REC-xmlschema-2-20041028/#regexs
      */
-    perl_regex = malloc((strlen(pattern) + 2) * sizeof(char));
+
+    /* we need to replace all "$" with "\$", count them now */
+    for (dol_count = 0, ptr = strchr(pattern, '$'); ptr; ++dol_count, ptr = strchr(ptr + 1, '$'));
+
+    perl_regex = malloc((strlen(pattern) + 4 + dol_count) * sizeof(char));
     LY_CHECK_ERR_RETURN(!perl_regex, LOGMEM, EXIT_FAILURE);
-    strcpy(perl_regex, pattern);
+    perl_regex[0] = '\0';
+
+    ptr = perl_regex;
+
     if (strncmp(pattern + strlen(pattern) - 2, ".*", 2)) {
-        strcat(perl_regex, "$");
+        /* we wil add line-end anchoring */
+        ptr[0] = '(';
+        ++ptr;
+    }
+
+    for (orig_ptr = pattern; orig_ptr[0]; ++orig_ptr) {
+        if (orig_ptr[0] == '$') {
+            ptr += sprintf(ptr, "\\$");
+        } else {
+            ptr[0] = orig_ptr[0];
+            ++ptr;
+        }
+    }
+
+    if (strncmp(pattern + strlen(pattern) - 2, ".*", 2)) {
+        ptr += sprintf(ptr, ")$");
+    } else {
+        ptr[0] = '\0';
+        ++ptr;
     }
 
     /* substitute Unicode Character Blocks with exact Character Ranges */
@@ -1428,15 +1399,17 @@ ident_val_add_module_prefix(const char *value, const struct lyxml_elem *xml, str
  * xml  - optional for converting instance-identifier and identityref into JSON format
  * leaf - mandatory to know the context (necessary e.g. for prefixes in idenitytref values)
  * attr - alternative to leaf in case of parsing value in annotations (attributes)
+ * local_mod - optional if the local module dos not match the module of leaf/attr
  * store - flag for union resolution - we do not want to store the result, we are just learning the type
  * dflt - whether the value is a default value from the schema
  */
 struct lys_type *
 lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *xml,
-                struct lyd_node_leaf_list *leaf, struct lyd_attr *attr,
+                struct lyd_node_leaf_list *leaf, struct lyd_attr *attr, struct lys_module *local_mod,
                 int store, int dflt)
 {
     struct lys_type *ret = NULL, *t;
+    struct lys_tpdf *tpdf;
     int c, len, found = 0, hidden;
     unsigned int i, j;
     int64_t num;
@@ -1444,7 +1417,6 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
     const char *ptr, *value = *value_, *itemname;
     struct lys_type_bit **bits = NULL;
     struct lys_ident *ident;
-    struct lys_module *mod;
     lyd_val *val;
     uint16_t *val_type;
     struct lyd_node *contextnode;
@@ -1453,14 +1425,18 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     if (leaf) {
         assert(!attr);
-        mod = leaf->schema->module;
+        if (!local_mod) {
+            local_mod = leaf->schema->module;
+        }
         val = &leaf->value;
         val_type = &leaf->value_type;
         contextnode = (struct lyd_node *)leaf;
         itemname = leaf->schema->name;
     } else {
         assert(!leaf);
-        mod = attr->annotation->module;
+        if (!local_mod) {
+            local_mod = attr->annotation->module;
+        }
         val = &attr->value;
         val_type = &attr->value_type;
         contextnode = attr->parent;
@@ -1513,7 +1489,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         if (unum & 3) {
             /* base64 length must be multiple of 4 chars */
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+            }
             LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL, "Base64 encoded value length must be divisible by 4.");
             goto cleanup;
         }
@@ -1584,7 +1564,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                     /* we have match, check if the value is enabled ... */
                     for (j = 0; j < type->info.bits.bit[i].iffeature_size; j++) {
                         if (!resolve_iffeature(&type->info.bits.bit[i].iffeature[j])) {
-                            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                            if (leaf) {
+                                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                            } else {
+                                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+                            }
                             LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL,
                                    "Bit \"%s\" is disabled by its %d. if-feature condition.",
                                    type->info.bits.bit[i].name, j + 1);
@@ -1594,7 +1578,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                     }
                     /* check that the value was not already set */
                     if (bits[i]) {
-                        LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                        if (leaf) {
+                            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                        } else {
+                            LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+                        }
                         LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL, "Bit \"%s\" used multiple times.",
                                type->info.bits.bit[i].name);
                         free(bits);
@@ -1610,8 +1598,12 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             }
 
             if (!found) {
-                /* referenced bit value does not exists */
-                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                /* referenced bit value does not exist */
+                if (leaf) {
+                    LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                } else {
+                    LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+                }
                 free(bits);
                 goto cleanup;
             }
@@ -1635,7 +1627,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                 val->bln = 1;
             }
         } else if (!value || strcmp(value, "false")) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value ? value : "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value ? value : "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value ? value : "");
+            }
             goto cleanup;
         } else {
             if (store) {
@@ -1650,13 +1646,21 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_DEC64:
         if (!value || !value[0]) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, "");
+            }
             goto cleanup;
         }
 
         ptr = value;
         if (parse_range_dec64(&ptr, type->info.dec64.dig, &num) || ptr[0]) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+            }
             goto cleanup;
         }
 
@@ -1675,7 +1679,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_EMPTY:
         if (value && value[0]) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+            }
             goto cleanup;
         }
 
@@ -1696,7 +1704,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                 /* we have match, check if the value is enabled ... */
                 for (j = 0; j < type->info.enums.enm[i].iffeature_size; j++) {
                     if (!resolve_iffeature(&type->info.enums.enm[i].iffeature[j])) {
-                        LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                        if (leaf) {
+                            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+                        } else {
+                            LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+                        }
                         LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL, "Enum \"%s\" is disabled by its %d. if-feature condition.",
                                value, j + 1);
                         goto cleanup;
@@ -1713,14 +1725,22 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
         }
 
         if (!found) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value ? value : "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value ? value : "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value ? value : "");
+            }
             goto cleanup;
         }
         break;
 
     case LY_TYPE_IDENT:
         if (!value) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, "");
+            }
             goto cleanup;
         }
 
@@ -1729,7 +1749,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             value = transform_xml2json(type->parent->module->ctx, value, xml, 0, 0, 0);
             if (!value) {
                 /* invalid identityref format */
-                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_, itemname);
+                if (leaf) {
+                    LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_, itemname);
+                } else {
+                    LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, *value_);
+                }
                 goto cleanup;
             }
 
@@ -1747,7 +1771,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
             /* the value actually uses module's prefixes instead of the module names as in JSON format,
              * we have to convert it */
-            value = transform_schema2json(mod, value);
+            value = transform_schema2json(local_mod, value);
             if (!value) {
                 /* invalid identityref format or it was already transformed, so ignore the error here */
                 value = lydict_insert(type->parent->module->ctx, *value_, 0);
@@ -1768,7 +1792,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             type->parent->flags |= LYS_DFLTJSON;
         }
 
-        ident = resolve_identref(type, value, contextnode, mod, dflt);
+        ident = resolve_identref(type, value, contextnode, local_mod, dflt);
         if (!ident) {
             goto cleanup;
         } else if (store) {
@@ -1778,7 +1802,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
         }
 
         make_canonical(type->parent->module->ctx, LY_TYPE_IDENT, &value,
-                       (void*)lys_main_module(mod)->name, NULL);
+                       (void*)lys_main_module(local_mod)->name, NULL);
 
         /* replace the old value with the new one (even if they may be the same) */
         lydict_remove(type->parent->module->ctx, *value_);
@@ -1787,7 +1811,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_INST:
         if (!value) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, "");
+            }
             goto cleanup;
         }
 
@@ -1796,7 +1824,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             value = transform_xml2json(type->parent->module->ctx, value, xml, 1, 1, 0);
             if (!value) {
                 /* invalid instance-identifier format */
-                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_, itemname);
+                if (leaf) {
+                    LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_, itemname);
+                } else {
+                    LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, *value_);
+                }
                 goto cleanup;
             }
         } else if (dflt) {
@@ -1806,7 +1838,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
             /* the value actually uses module's prefixes instead of the module names as in JSON format,
              * we have to convert it */
-            value = transform_schema2json(mod, value);
+            value = transform_schema2json(local_mod, value);
             if (!value) {
                 /* invalid identityref format or it was already transformed, so ignore the error here */
                 value = *value_;
@@ -1843,16 +1875,24 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_LEAFREF:
         if (!value) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, "");
+            }
             goto cleanup;
         }
 
         /* it is called not only to get the final type, but mainly to update value to canonical or JSON form
          * if needed */
-        t = lyp_parse_value(&type->info.lref.target->type, value_, xml, leaf, attr, store, dflt);
+        t = lyp_parse_value(&type->info.lref.target->type, value_, xml, leaf, attr, NULL, store, dflt);
         value = *value_; /* refresh possibly changed value */
         if (!t) {
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, value);
+            }
             goto cleanup;
         }
 
@@ -1871,6 +1911,30 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         if (validate_pattern(value, type, contextnode)) {
             goto cleanup;
+        }
+
+        /* special handling of ietf-yang-types xpath1.0 */
+        for (tpdf = type->der;
+             tpdf->module && (strcmp(tpdf->name, "xpath1.0") || strcmp(tpdf->module->name, "ietf-yang-types"));
+             tpdf = tpdf->type.der);
+        if (tpdf->module && xml) {
+            /* convert value into the json format */
+            value = transform_xml2json(type->parent->module->ctx, value, xml, 1, 1, 0);
+            if (!value) {
+                /* invalid instance-identifier format */
+                if (leaf) {
+                    LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_, itemname);
+                } else {
+                    LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, *value_);
+                }
+                goto cleanup;
+            }
+
+            if (value != *value_) {
+                /* update the changed value */
+                lydict_remove(type->parent->module->ctx, *value_);
+                *value_ = value;
+            }
         }
 
         if (store) {
@@ -2031,7 +2095,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         while ((t = lyp_get_next_union_type(type, t, &found))) {
             found = 0;
-            ret = lyp_parse_value(t, value_, xml, leaf, attr, store, dflt);
+            ret = lyp_parse_value(t, value_, xml, leaf, attr, NULL, store, dflt);
             if (ret) {
                 /* we have the result */
                 type = ret;
@@ -2060,7 +2124,11 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             if (store) {
                 *val_type &= ~LY_DATA_TYPE_MASK;
             }
-            LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_ ? *value_ : "", itemname);
+            if (leaf) {
+                LOGVAL(LYE_INVAL, LY_VLOG_LYD, contextnode, *value_ ? *value_ : "", itemname);
+            } else {
+                LOGVAL(LYE_INMETA, LY_VLOG_LYD, contextnode, "<none>", itemname, *value_);
+            }
             goto cleanup;
         }
         break;
@@ -2182,7 +2250,7 @@ lyp_fill_attr(struct ly_ctx *ctx, struct lyd_node *parent, const char *module_ns
     /* the value is here converted to a JSON format if needed in case of LY_TYPE_IDENT and LY_TYPE_INST or to a
      * canonical form of the value */
     type = lys_ext_complex_get_substmt(LY_STMT_TYPE, dattr->annotation, NULL);
-    if (!type || !lyp_parse_value(*type, &dattr->value_str, xml, NULL, dattr, 1, 0)) {
+    if (!type || !lyp_parse_value(*type, &dattr->value_str, xml, NULL, dattr, NULL, 1, 0)) {
         free(dattr);
         return -1;
     }
@@ -2699,21 +2767,29 @@ lyp_check_status(uint16_t flags1, struct lys_module *mod1, const char *name1,
 }
 
 void
-lyp_del_includedup(struct lys_module *mod)
+lyp_del_includedup(struct lys_module *mod, int free_subs)
 {
     struct ly_modules_list *models = &mod->ctx->models;
     uint8_t i;
 
     assert(mod && !mod->type);
 
-    if (mod->inc_size && models->parsed_submodules_count) {
+    if (models->parsed_submodules_count) {
         for (i = models->parsed_submodules_count - 1; models->parsed_submodules[i]->type; --i);
-        assert(models->parsed_submodules[i] == mod);
+        if (models->parsed_submodules[i] == mod) {
+            if (free_subs) {
+                for (i = models->parsed_submodules_count - 1; models->parsed_submodules[i]->type; --i) {
+                    lys_sub_module_remove_devs_augs((struct lys_module *)models->parsed_submodules[i]);
+                    lys_submodule_module_data_free((struct lys_submodule *)models->parsed_submodules[i]);
+                    lys_submodule_free((struct lys_submodule *)models->parsed_submodules[i], NULL);
+                }
+            }
 
-        models->parsed_submodules_count = i;
-        if (!models->parsed_submodules_count) {
-            free(models->parsed_submodules);
-            models->parsed_submodules = NULL;
+            models->parsed_submodules_count = i;
+            if (!models->parsed_submodules_count) {
+                free(models->parsed_submodules);
+                models->parsed_submodules = NULL;
+            }
         }
     }
 }
@@ -2823,6 +2899,7 @@ lyp_check_includedup(struct lys_module *mod, const char *name, struct lys_includ
     }
 
     if (parsed_sub_count) {
+        assert(!parsed_sub[0]->type);
         for (i = parsed_sub_count - 1; parsed_sub[i]->type; --i) {
             if (ly_strequal(parsed_sub[i]->name, name, 1)) {
                 /* check revisions, including multiple revisions of a single module is error */
@@ -3380,7 +3457,7 @@ lyp_deviate_del_ext(struct lys_node *target, struct lys_ext_instance *ext)
     }
 
     if (!found) {
-        path = lys_path(target);
+        path = lys_path(target, LYS_PATH_FIRST_PREFIX);
         LOGERR(LY_EVALID, "Extension deviation: extension \"%s\" to delete not found in \"%s\".", ext->def->name, path)
         free(path);
         return EXIT_FAILURE;

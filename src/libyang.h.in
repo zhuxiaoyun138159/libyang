@@ -144,7 +144,7 @@ extern "C" {
  * the most efficient way. Alternatively, the ly_ctx_info() function can be used to get complex information
  * about the schemas in the context in the form of data tree defined by
  * <a href="https://tools.ietf.org/html/draft-ietf-netconf-yang-library-04">ietf-yang-library</a> schema.
- * To get a specific node defined in a module in the context, ly_ctx_get_node() can be used.
+ * To get a specific node defined in a module in the context, ly_ctx_find_path() or ly_ctx_get_node() can be used.
  *
  * Modules held by a context can be removed by ly_ctx_remove_module(). Besides removing the module, it is possible
  * just to disable it with lys_set_disabled(). In this case the module is hidden in the context (disabled modules can
@@ -181,6 +181,7 @@ extern "C" {
  * - ly_ctx_get_submodule()
  * - ly_ctx_get_submodule2()
  * - ly_ctx_get_node()
+ * - ly_ctx_find_path()
  * - ly_ctx_remove_module()
  * - ly_ctx_clean()
  * - ly_ctx_destroy()
@@ -945,6 +946,7 @@ extern "C" {
  * - lyd_path()
  * - lys_data_path()
  * - ly_ctx_get_node()
+ * - ly_ctx_find_path()
  *
  */
 
@@ -1060,7 +1062,7 @@ struct ly_ctx;
                                         causes that function ly_ctx_info() does not work (returns NULL) until
                                         the ietf-yang-library module is loaded manually. While any revision
                                         of this schema can be loaded with this option, note that the only
-                                        revisions implemented by ly_ctx_info() are 2016-06-21 and 2017-08-17.
+                                        revisions implemented by ly_ctx_info() are 2016-04-09 and 2018-01-17.
                                         This option cannot be used with ly_ctx_new_yl*() functions. */
 
 /**@} contextoptions */
@@ -1096,6 +1098,10 @@ struct ly_ctx *ly_ctx_new(const char *search_dir, int options);
  * ly_ctx_new() by loading modules specified in the ietf-yang-library form into the context
  * being created.
  *
+ * The preferred tree model revision is 2018-01-17. However, only the first module-set is processed
+ * and loaded into the context. If there are no matching nodes from this tree, the legacy tree
+ * (originally from model revision 2016-04-09) is processed.
+ *
  * Note, that the modules are loaded the same way as in case of ly_ctx_load_module(), so the schema
  * paths in the yang-library data are ignored and the modules are loaded from the context's search
  * locations. On the other hand, YANG features of the modules are set as specified in the yang-library
@@ -1119,6 +1125,10 @@ struct ly_ctx *ly_ctx_new_ylpath(const char *search_dir, const char *path, LYD_F
  * as path to a file holding the data, use ly_ctx_new_ylpath(). Both functions extend functionality of
  * ly_ctx_new() by loading modules specified in the ietf-yang-library form into the context
  * being created.
+ *
+ * The preferred tree model revision is 2018-01-17. However, only the first module-set is processed
+ * and loaded into the context. If there are no matching nodes from this tree, the legacy tree
+ * (originally from model revision 2016-04-09) is processed.
  *
  * Note, that the modules are loaded the same way as in case of ly_ctx_load_module(), so the schema
  * paths in the yang-library data are ignored and the modules are loaded from the context's search
@@ -1411,17 +1421,32 @@ const struct lys_submodule *ly_ctx_get_submodule2(const struct lys_module *main_
 /**
  * @brief Get schema node according to the given data path (JSON format, see @ref howtoxpath).
  *
- * This function is primarily meant as a utility function to ease getting specific schema nodes
- * directly from context having data_path a const immutable string.
+ * This function is meant as a utility function to ease getting a specific schema node
+ * directly from context having \p data_path a const immutable string. Generally,
+ * it is better to use lyd_find_path(), lys_find_path(), or ly_ctx_find_path(). Also,
+ * it is possible to transform data paths into schema paths using ly_path_data2schema().
  *
  * @param[in] ctx Context to work in. Must be set if \p start is NULL.
- * @param[in] start Starting node for a relative schema node identifier, in which
+ * @param[in] start Starting node for a relative data node identifier, in which
  * case it is mandatory and \p ctx can be NULL.
- * @param[in] data_path JSON schema node identifier.
+ * @param[in] data_path JSON data path of the node to get.
  * @param[in] output Search operation output instead input.
  * @return Resolved schema node or NULL.
  */
 const struct lys_node *ly_ctx_get_node(struct ly_ctx *ctx, const struct lys_node *start, const char *data_path, int output);
+
+/**
+ * @brief Get schema node according to the given schema path (see @ref howtoxpath).
+ *
+ * Note that the given path must be absolute and fully prefixed (which is the default output
+ * of lys_path() function). To get node specified by a relative path, use lys_find_path() instead.
+ *
+ * @param[in] ctx Context to work in.
+ * @param[in] path Schema path of the node to find.
+ * @return Set of found schema nodes. If no nodes are matching \p path the returned set is empty.
+ * In case of an error, NULL is returned.
+ */
+struct ly_set *ly_ctx_find_path(struct ly_ctx *ctx, const char *path);
 
 /**
  * @brief Remove the specified module from its context.
@@ -1470,7 +1495,9 @@ void ly_ctx_destroy(struct ly_ctx *ctx, void (*private_destructor)(const struct 
 /**
  * @brief Transform a data path into schema path (see @ref howtoxpath).
  *
- * Only simple paths can be used, no complex XPath expressions.
+ * Some XPath tokens such as "*" or "//" should not be used because they cannot be properly
+ * transformed into schema path. If used, any following nodes will not be transformed and simply copied,
+ * so use at your own risk! It causes no problems if the path ends with the aforementioned tokens.
  *
  * @param[in] ctx Context to work in.
  * @param[in] data_path Data path to be transformed.
@@ -1551,6 +1578,20 @@ struct ly_set *ly_set_dup(const struct ly_set *set);
  * @return -1 on failure, index of the \p node in the set on success
  */
 int ly_set_add(struct ly_set *set, void *node, int options);
+
+/**
+ * @brief Add all objects from \p src to \p trg.
+ *
+ * Since it is a set, the function checks for duplicities.
+ * After success, \p src is completely freed.
+ *
+ * @param[in] trg Target (result) set.
+ * @param[in] src Source set.
+ * @param[in] options Options to change behavior of the function. Accepted options are:
+ * - #LY_SET_OPT_USEASLIST - do not check for duplicities
+ * @return -1 on failure, number of objects added into \p trg on success.
+ */
+int ly_set_merge(struct ly_set *trg, struct ly_set *src, int options);
 
 /**
  * @brief Get know if the set contains the specified object.

@@ -212,45 +212,29 @@ transform_module_name2import_prefix(const struct lys_module *module, const char 
     return NULL;
 }
 
-static const char *
-_transform_json2xml(const struct lys_module *module, const char *expr, int schema, int inst_id, const char ***prefixes,
+static int
+_transform_json2xml_subexp(const struct lys_module *module, const char *expr, char **out, size_t *out_used, size_t *out_size, int schema, int inst_id, const char ***prefixes,
                     const char ***namespaces, uint32_t *ns_count)
 {
-    const char *cur_expr, *end, *prefix, *ptr;
-    char *out, *name;
-    size_t out_size, out_used, name_len;
+    const char *cur_expr, *end, *prefix, *literal;
+    char *name;
+    size_t name_len;
     const struct lys_module *mod = NULL, *prev_mod = NULL;
     uint32_t i, j;
     struct lyxp_expr *exp;
 
     assert(module && expr && ((!prefixes && !namespaces && !ns_count) || (prefixes && namespaces && ns_count)));
 
-    if (ns_count) {
-        *ns_count = 0;
-        *prefixes = NULL;
-        *namespaces = NULL;
-    }
-
-    if (!expr[0]) {
-        /* empty value */
-        return lydict_insert(module->ctx, expr, 0);
-    }
-
-    out_size = strlen(expr) + 1;
-    out = malloc(out_size);
-    LY_CHECK_ERR_RETURN(!out, LOGMEM, NULL);
-    out_used = 0;
-
     exp = lyxp_parse_expr(expr);
-    LY_CHECK_ERR_RETURN(!exp, free(out), NULL);
+    LY_CHECK_RETURN(!exp, 1);
 
     for (i = 0; i < exp->used; ++i) {
         cur_expr = &exp->expr[exp->expr_pos[i]];
 
         /* copy WS */
         if (i && ((end = exp->expr + exp->expr_pos[i - 1] + exp->tok_len[i - 1]) != cur_expr)) {
-            strncpy(&out[out_used], end, cur_expr - end);
-            out_used += cur_expr - end;
+            strncpy(&(*out)[*out_used], end, cur_expr - end);
+            (*out_used) += cur_expr - end;
         }
 
         if ((exp->tokens[i] == LYXP_TOKEN_NAMETEST) && ((end = strnchr(cur_expr, ':', exp->tok_len[i])) || inst_id)) {
@@ -259,7 +243,14 @@ _transform_json2xml(const struct lys_module *module, const char *expr, int schem
                 if (end) {
                     name_len = end - cur_expr;
                     name = strndup(cur_expr, name_len);
-                    mod = ly_ctx_get_module(module->ctx, name, NULL, 1);
+                    mod = ly_ctx_get_module(module->ctx, name, NULL, 0);
+                    if (module->ctx->data_clb) {
+                        if (!mod) {
+                            mod = module->ctx->data_clb(module->ctx, name, NULL, 0, module->ctx->data_clb_data);
+                        } else if (!mod->implemented) {
+                            mod = module->ctx->data_clb(module->ctx, name, mod->ns, LY_MODCLB_NOT_IMPLEMENTED, module->ctx->data_clb_data);
+                        }
+                    }
                     free(name);
                     if (!mod) {
                         LOGVAL(LYE_INMOD_LEN, LY_VLOG_NONE, NULL, name_len, cur_expr);
@@ -311,101 +302,93 @@ _transform_json2xml(const struct lys_module *module, const char *expr, int schem
             }
 
             /* adjust out size (it can even decrease in some strange cases) */
-            out_size += strlen(prefix) + 1 - name_len;
-            out = ly_realloc(out, out_size);
-            LY_CHECK_ERR_GOTO(!out, LOGMEM, error);
+            *out_size += strlen(prefix) + 1 - name_len;
+            *out = ly_realloc(*out, *out_size);
+            LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
 
             /* copy the model name */
-            strcpy(&out[out_used], prefix);
-            out_used += strlen(prefix);
+            strcpy(&(*out)[*out_used], prefix);
+            *out_used += strlen(prefix);
 
             if (!name_len) {
                 /* we are adding the prefix, so also ':' */
-                out[out_used] = ':';
-                ++out_used;
+                (*out)[*out_used] = ':';
+                ++(*out_used);
             }
 
             /* copy the rest */
-            strncpy(&out[out_used], end, exp->tok_len[i] - name_len);
-            out_used += exp->tok_len[i] - name_len;
+            strncpy(&(*out)[*out_used], end, exp->tok_len[i] - name_len);
+            *out_used += exp->tok_len[i] - name_len;
         } else if ((exp->tokens[i] == LYXP_TOKEN_LITERAL) && (end = strnchr(cur_expr, ':', exp->tok_len[i]))) {
-            ptr = end;
-            while (isalnum(ptr[-1]) || (ptr[-1] == '_') || (ptr[-1] == '-') || (ptr[-1] == '.')) {
-                --ptr;
+            /* copy begin quote */
+            (*out)[*out_used] = cur_expr[0];
+            ++(*out_used);
+
+            /* skip quotes */
+            literal = lydict_insert(module->ctx, cur_expr + 1, exp->tok_len[i] - 2);
+
+            /* parse literals as subexpressions if possible, otherwise treat as a literal */
+            if (_transform_json2xml_subexp(module, literal, out, out_used, out_size, schema, inst_id, prefixes, namespaces, ns_count)) {
+                strncpy(&(*out)[*out_used], literal, exp->tok_len[i] - 2);
+                *out_used += exp->tok_len[i] - 2;
             }
 
-            /* get the module */
-            name_len = end - ptr;
-            if (!schema) {
-                prefix = NULL;
-                name = strndup(ptr, name_len);
-                mod = ly_ctx_get_module(module->ctx, name, NULL, 1);
-                free(name);
-                if (mod) {
-                    prefix = mod->prefix;
-                }
-            } else {
-                name = strndup(ptr, name_len);
-                prefix = transform_module_name2import_prefix(module, name);
-                free(name);
-            }
+            lydict_remove(module->ctx, literal);
 
-            if (prefix) {
-                /* remember the namespace definition (only if it's new) */
-                if (!schema && ns_count) {
-                    for (j = 0; j < *ns_count; ++j) {
-                        if (ly_strequal((*namespaces)[j], mod->ns, 1)) {
-                            break;
-                        }
-                    }
-                    if (j == *ns_count) {
-                        ++(*ns_count);
-                        *prefixes = ly_realloc(*prefixes, *ns_count * sizeof **prefixes);
-                        LY_CHECK_ERR_GOTO(!(*prefixes), LOGMEM, error);
-                        *namespaces = ly_realloc(*namespaces, *ns_count * sizeof **namespaces);
-                        LY_CHECK_ERR_GOTO(!(*namespaces), LOGMEM, error);
-                        (*prefixes)[*ns_count - 1] = mod->prefix;
-                        (*namespaces)[*ns_count - 1] = mod->ns;
-                    }
-                }
-
-                /* adjust out size (it can even decrease in some strange cases) */
-                out_size += strlen(prefix) - name_len;
-                out = ly_realloc(out, out_size);
-                LY_CHECK_ERR_GOTO(!out, LOGMEM, error);
-
-                /* copy any beginning */
-                strncpy(&out[out_used], cur_expr, ptr - cur_expr);
-                out_used += ptr - cur_expr;
-
-                /* copy the model name */
-                strcpy(&out[out_used], prefix);
-                out_used += strlen(prefix);
-
-                /* copy the rest */
-                strncpy(&out[out_used], end, (exp->tok_len[i] - name_len) - (ptr - cur_expr));
-                out_used += (exp->tok_len[i] - name_len) - (ptr - cur_expr);
-            } else {
-                strncpy(&out[out_used], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
-                out_used += exp->tok_len[i];
-            }
+            /* copy end quote */
+            (*out)[*out_used] = cur_expr[exp->tok_len[i] - 1];
+            ++(*out_used);
         } else {
-            strncpy(&out[out_used], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
-            out_used += exp->tok_len[i];
+            strncpy(&(*out)[*out_used], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
+            *out_used += exp->tok_len[i];
         }
     }
-    out[out_used] = '\0';
 
     lyxp_expr_free(exp);
-    return lydict_insert_zc(module->ctx, out);
+    return 0;
 
 error:
     if (!schema && ns_count) {
         free(*prefixes);
         free(*namespaces);
     }
-    free(out);
     lyxp_expr_free(exp);
+    return 1;
+}
+
+static const char *
+_transform_json2xml(const struct lys_module *module, const char *expr, int schema, int inst_id, const char ***prefixes,
+                    const char ***namespaces, uint32_t *ns_count)
+{
+    char *out;
+    size_t out_size, out_used;
+    int ret;
+
+    assert(module && expr && ((!prefixes && !namespaces && !ns_count) || (prefixes && namespaces && ns_count)));
+
+    if (ns_count) {
+        *ns_count = 0;
+        *prefixes = NULL;
+        *namespaces = NULL;
+    }
+
+    if (!expr[0]) {
+        /* empty value */
+        return lydict_insert(module->ctx, expr, 0);
+    }
+
+    out_size = strlen(expr) + 1;
+    out = malloc(out_size);
+    LY_CHECK_ERR_RETURN(!out, LOGMEM, NULL);
+    out_used = 0;
+
+    ret = _transform_json2xml_subexp(module, expr, &out, &out_used, &out_size, schema, inst_id, prefixes, namespaces, ns_count);
+    if (!ret) {
+        out[out_used] = '\0';
+        return lydict_insert_zc(module->ctx, out);
+    }
+
+    free(out);
     return NULL;
 }
 
@@ -422,31 +405,21 @@ transform_json2schema(const struct lys_module *module, const char *expr)
     return _transform_json2xml(module, expr, 1, 0, NULL, NULL, NULL);
 }
 
-const char *
-transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml, int inst_id, int use_ctx_data_clb, int log)
+static int
+transform_xml2json_subexp(struct ly_ctx *ctx, const char *expr, char **out, size_t *out_used, size_t *out_size,
+                          struct lyxml_elem *xml, int inst_id, int use_ctx_data_clb, int log)
 {
-    const char *end, *cur_expr, *ptr;
-    char *out, *prefix;
+    const char *end, *cur_expr, *literal;
+    char *prefix;
     uint16_t i;
-    size_t out_size, out_used, pref_len;
+    size_t pref_len;
     const struct lys_module *mod, *prev_mod = NULL;
     const struct lyxml_ns *ns;
     struct lyxp_expr *exp;
 
-    out_size = strlen(expr) + 1;
-    out = malloc(out_size);
-    if (!out) {
-        if (log) {
-            LOGMEM;
-        }
-        return NULL;
-    }
-    out_used = 0;
-
     exp = lyxp_parse_expr(expr);
     if (!exp) {
-        free(out);
-        return NULL;
+        return 1;
     }
 
     for (i = 0; i < exp->used; ++i) {
@@ -454,8 +427,8 @@ transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml,
 
         /* copy WS */
         if (i && ((end = exp->expr + exp->expr_pos[i - 1] + exp->tok_len[i - 1]) != cur_expr)) {
-            strncpy(&out[out_used], end, cur_expr - end);
-            out_used += cur_expr - end;
+            strncpy(&(*out)[*out_used], end, cur_expr - end);
+            (*out_used) += cur_expr - end;
         }
 
         if ((exp->tokens[i] == LYXP_TOKEN_NAMETEST) && (end = strnchr(cur_expr, ':', exp->tok_len[i]))) {
@@ -478,7 +451,7 @@ transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml,
                 }
                 goto error;
             }
-            mod = ly_ctx_get_module_by_ns(ctx, ns->value, NULL, 1);
+            mod = ly_ctx_get_module_by_ns(ctx, ns->value, NULL, 0);
             if (use_ctx_data_clb && ctx->data_clb) {
                 if (!mod) {
                     mod = ctx->data_clb(ctx, NULL, ns->value, 0, ctx->data_clb_data);
@@ -497,9 +470,9 @@ transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml,
 
             if (!inst_id || (mod != prev_mod)) {
                 /* adjust out size (it can even decrease in some strange cases) */
-                out_size += strlen(mod->name) - pref_len;
-                out = ly_realloc(out, out_size);
-                if (!out) {
+                *out_size += strlen(mod->name) - pref_len;
+                *out = ly_realloc(*out, *out_size);
+                if (!(*out)) {
                     if (log) {
                         LOGMEM;
                     }
@@ -507,8 +480,8 @@ transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml,
                 }
 
                 /* copy the model name */
-                strcpy(&out[out_used], mod->name);
-                out_used += strlen(mod->name);
+                strcpy(&(*out)[*out_used], mod->name);
+                *out_used += strlen(mod->name);
             } else {
                 /* skip ':' */
                 ++end;
@@ -519,8 +492,8 @@ transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml,
             prev_mod = mod;
 
             /* copy the rest */
-            strncpy(&out[out_used], end, exp->tok_len[i] - pref_len);
-            out_used += exp->tok_len[i] - pref_len;
+            strncpy(&(*out)[*out_used], end, exp->tok_len[i] - pref_len);
+            *out_used += exp->tok_len[i] - pref_len;
         } else if ((exp->tokens[i] == LYXP_TOKEN_NAMETEST) && inst_id) {
             if (log) {
                 LOGVAL(LYE_XML_INVAL, LY_VLOG_XML, xml, "namespace prefix");
@@ -528,70 +501,62 @@ transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml,
             }
             goto error;
         } else if ((exp->tokens[i] == LYXP_TOKEN_LITERAL) && (end = strnchr(cur_expr, ':', exp->tok_len[i]))) {
-            ptr = end;
-            while (isalnum(ptr[-1]) || (ptr[-1] == '_') || (ptr[-1] == '-') || (ptr[-1] == '.')) {
-                --ptr;
+            /* copy begin quote */
+            (*out)[*out_used] = cur_expr[0];
+            ++(*out_used);
+
+            /* skip quotes */
+            literal = lydict_insert(ctx, cur_expr + 1, exp->tok_len[i] - 2);
+
+            /* parse literals as subexpressions if possible, otherwise treat as a literal */
+            if (transform_xml2json_subexp(ctx, literal, out, out_used, out_size, xml, inst_id, use_ctx_data_clb, 0)) {
+                strncpy(&(*out)[*out_used], literal, exp->tok_len[i] - 2);
+                *out_used += exp->tok_len[i] - 2;
             }
 
-            /* get the module */
-            pref_len = end - cur_expr;
-            prefix = strndup(cur_expr, pref_len);
-            if (!prefix) {
-                if (log) {
-                    LOGMEM;
-                }
-                goto error;
-            }
-            ns = lyxml_get_ns(xml, prefix);
-            free(prefix);
-            if (!ns) {
-                if (log) {
-                    LOGVAL(LYE_XML_INVAL, LY_VLOG_XML, xml, "namespace prefix");
-                    LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL,
-                        "XML namespace with prefix \"%.*s\" not defined.", pref_len, cur_expr);
-                }
-                goto error;
-            }
-            mod = ly_ctx_get_module_by_ns(ctx, ns->value, NULL, 1);
-            if (mod) {
-                /* adjust out size (it can even decrease in some strange cases) */
-                out_size += strlen(mod->name) - pref_len;
-                out = ly_realloc(out, out_size);
-                if (!out) {
-                    if (log) {
-                        LOGMEM;
-                    }
-                    goto error;
-                }
+            lydict_remove(ctx, literal);
 
-                /* copy any beginning */
-                strncpy(&out[out_used], cur_expr, ptr - cur_expr);
-                out_used += ptr - cur_expr;
-
-                /* copy the model name */
-                strcpy(&out[out_used], mod->name);
-                out_used += strlen(mod->name);
-
-                /* copy the rest */
-                strncpy(&out[out_used], end, (exp->tok_len[i] - pref_len) - (ptr - cur_expr));
-                out_used += (exp->tok_len[i] - pref_len) - (ptr - cur_expr);
-            } else {
-                strncpy(&out[out_used], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
-                out_used += exp->tok_len[i];
-            }
+            /* copy end quote */
+            (*out)[*out_used] = cur_expr[exp->tok_len[i] - 1];
+            ++(*out_used);
         } else {
-            strncpy(&out[out_used], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
-            out_used += exp->tok_len[i];
+            strncpy(&(*out)[*out_used], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
+            *out_used += exp->tok_len[i];
         }
     }
-    out[out_used] = '\0';
 
     lyxp_expr_free(exp);
-    return lydict_insert_zc(ctx, out);
+    return 0;
 
 error:
-    free(out);
     lyxp_expr_free(exp);
+    return 1;
+}
+
+const char *
+transform_xml2json(struct ly_ctx *ctx, const char *expr, struct lyxml_elem *xml, int inst_id, int use_ctx_data_clb, int log)
+{
+    char *out;
+    size_t out_size, out_used;
+    int ret;
+
+    out_size = strlen(expr) + 1;
+    out = malloc(out_size);
+    if (!out) {
+        if (log) {
+            LOGMEM;
+        }
+        return NULL;
+    }
+    out_used = 0;
+
+    ret = transform_xml2json_subexp(ctx, expr, &out, &out_used, &out_size, xml, inst_id, use_ctx_data_clb, log);
+    if (!ret) {
+        out[out_used] = '\0';
+        return lydict_insert_zc(ctx, out);
+    }
+
+    free(out);
     return NULL;
 }
 
@@ -791,6 +756,11 @@ transform_json2xpath_subexpr(const struct lys_module *cur_module, const struct l
                 return -1;
             }
 
+            if (*i >= exp->used) {
+                LOGVAL(LYE_XPATH_EOF, LY_VLOG_NONE, NULL);
+                return -1;
+            }
+
             /* copy "]" */
             strncpy(*out + *out_used, &exp->expr[exp->expr_pos[*i]], exp->tok_len[*i]);
             *out_used += exp->tok_len[*i];
@@ -910,6 +880,20 @@ error:
 }
 
 static int
+ly_path_data2schema_copy_token(struct lyxp_expr *exp, uint16_t cur_exp, char **out, uint16_t *out_used)
+{
+    uint16_t len;
+
+    for (len = exp->tok_len[cur_exp]; isspace(exp->expr[exp->expr_pos[cur_exp] + len]); ++len);
+    *out = ly_realloc(*out, *out_used + len);
+    LY_CHECK_ERR_RETURN(!(*out), LOGMEM, -1);
+    sprintf(*out + *out_used - 1, "%.*s", len, exp->expr + exp->expr_pos[cur_exp]);
+    *out_used += len;
+
+    return 0;
+}
+
+static int
 ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig_parent, const struct lys_module *cur_mod,
                            struct lyxp_expr *exp, uint16_t *cur_exp, char **out, uint16_t *out_used)
 {
@@ -917,22 +901,47 @@ ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig
     char *str = NULL, *col;
     const struct lys_node *node, *node2, *parent;
     enum lyxp_token end_token = 0;
+    int first, path_lost;
 
-    if (exp->tokens[*cur_exp] == LYXP_TOKEN_BRACK1) {
+    switch (exp->tokens[*cur_exp]) {
+    case LYXP_TOKEN_BRACK1:
         end_token = LYXP_TOKEN_BRACK2;
 
-        *out = ly_realloc(*out, *out_used + 1);
-        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
-        sprintf(*out + *out_used - 1, "[");
-        *out_used += 1;
+        if (ly_path_data2schema_copy_token(exp, *cur_exp, out, out_used)) {
+            goto error;
+        }
         ++(*cur_exp);
+        first = 0;
+        break;
+    case LYXP_TOKEN_PAR1:
+        end_token = LYXP_TOKEN_PAR2;
+
+        if (ly_path_data2schema_copy_token(exp, *cur_exp, out, out_used)) {
+            goto error;
+        }
+        ++(*cur_exp);
+        first = 0;
+        break;
+    default:
+        first = 1;
+        break;
     }
 
+    path_lost = 0;
     parent = orig_parent;
     while (*cur_exp < exp->used) {
         switch (exp->tokens[*cur_exp]) {
         case LYXP_TOKEN_DOT:
+        case LYXP_TOKEN_DDOT:
         case LYXP_TOKEN_NAMETEST:
+            if (path_lost) {
+                /* we do not know anything anymore, just copy it */
+                if (ly_path_data2schema_copy_token(exp, *cur_exp, out, out_used)) {
+                    goto error;
+                }
+                break;
+            }
+
             str = strndup(exp->expr + exp->expr_pos[*cur_exp], exp->tok_len[*cur_exp]);
             LY_CHECK_ERR_GOTO(!str, LOGMEM, error);
 
@@ -943,7 +952,7 @@ ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig
             }
 
             /* first node */
-            if (!parent) {
+            if (first) {
                 if (!col) {
                     LOGVAL(LYE_PATH_MISSMOD, LY_VLOG_NONE, NULL);
                     goto error;
@@ -954,16 +963,25 @@ ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig
                     LOGVAL(LYE_XPATH_INMOD, LY_VLOG_NONE, NULL, strlen(str), str);
                     goto error;
                 }
+
+                first = 0;
             }
 
             if (((col ? col[0] : str[0]) == '.') || ((col ? col[0] : str[0]) == '*')) {
+                free(str);
+                str = NULL;
+
                 if (end_token) {
                     LOGERR(LY_EINVAL, "Invalid path used (%s in a subexpression).", str);
                     goto error;
                 }
 
-                /* path ends, just copy the rest and finish (if it is the first node, it must have had a prefix before) */
-                goto finish;
+                /* we can no longer evaluate the path, so just copy the rest */
+                path_lost = 1;
+                if (ly_path_data2schema_copy_token(exp, *cur_exp, out, out_used)) {
+                    goto error;
+                }
+                break;
             }
 
             /* create schema path for this data node */
@@ -981,12 +999,26 @@ ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig
                 }
 
                 /* determine how deep the node actually is, we must generate the path from the highest parent */
-                for (j = 0, node2 = node; node2 != parent; node2 = lys_parent(node2), ++j);
+                j = 0;
+                node2 = node;
+                while (node2 != parent) {
+                    node2 = lys_parent(node2);
+                    if (!node2 || (node2->nodetype != LYS_USES)) {
+                        ++j;
+                    }
+                }
 
                 /* first node, do not print '/' */
                 slash = 0;
                 while (j) {
-                    for (k = j - 1, node2 = node; k; node2 = lys_parent(node2), --k);
+                    k = j - 1;
+                    node2 = node;
+                    while (k) {
+                        node2 = lys_parent(node2);
+                        if (!node2 || (node2->nodetype != LYS_USES)) {
+                            --k;
+                        }
+                    }
 
                     if ((lys_node_module(node2) != cur_mod) || !parent) {
                         /* module name and node name */
@@ -1011,33 +1043,62 @@ ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig
                 break;
             }
 
+            /* copy any whitespaces */
+            for (len = 0; isspace(exp->expr[exp->expr_pos[*cur_exp] + exp->tok_len[*cur_exp] + len]); ++len);
+            if (len) {
+                *out = ly_realloc(*out, *out_used + len);
+                LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
+                sprintf(*out + *out_used - 1, "%*s", len, " ");
+                *out_used += len;
+            }
+
             /* next iteration */
             free(str);
             str = NULL;
             parent = node;
             break;
+        case LYXP_TOKEN_COMMA:
+        case LYXP_TOKEN_OPERATOR_LOG:
+        case LYXP_TOKEN_OPERATOR_COMP:
+        case LYXP_TOKEN_OPERATOR_MATH:
+        case LYXP_TOKEN_OPERATOR_UNI:
+            /* reset the processing */
+            first = 1;
+            path_lost = 0;
+            parent = orig_parent;
+
+            /* fallthrough */
         case LYXP_TOKEN_OPERATOR_PATH:
+            if ((exp->tokens[*cur_exp] == LYXP_TOKEN_OPERATOR_PATH) && (exp->tok_len[*cur_exp] == 2)) {
+                /* we can no longer evaluate the path further */
+                path_lost = 1;
+            }
+            /* fallthrough */
+        case LYXP_TOKEN_NODETYPE:
+        case LYXP_TOKEN_FUNCNAME:
+        case LYXP_TOKEN_LITERAL:
+        case LYXP_TOKEN_NUMBER:
             /* just copy it */
-            len = exp->tok_len[*cur_exp];
-            *out = ly_realloc(*out, *out_used + len);
-            LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
-            sprintf(*out + *out_used - 1, "%.*s", exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
-            *out_used += len;
+            if (ly_path_data2schema_copy_token(exp, *cur_exp, out, out_used)) {
+                goto error;
+            }
             break;
         case LYXP_TOKEN_BRACK1:
+        case LYXP_TOKEN_PAR1:
             if (ly_path_data2schema_subexp(ctx, parent, cur_mod, exp, cur_exp, out, out_used)) {
                 goto error;
             }
             break;
-        case LYXP_TOKEN_OPERATOR_COMP:
-            goto finish;
         default:
             if (end_token && (exp->tokens[*cur_exp] == end_token)) {
-                /* we are done */
-                goto finish;
+                /* we are done (with this subexpression) */
+                if (ly_path_data2schema_copy_token(exp, *cur_exp, out, out_used)) {
+                    goto error;
+                }
+
+                return 0;
             }
-            LOGERR(LY_EINVAL, "Invalid token used (%.*s).",
-                   __func__, exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
+            LOGERR(LY_EINVAL, "Invalid token used (%.*s).", exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
             goto error;
         }
 
@@ -1054,33 +1115,6 @@ ly_path_data2schema_subexp(const struct ly_ctx *ctx, const struct lys_node *orig
 error:
     free(str);
     return -1;
-
-finish:
-    if (end_token) {
-        for (j = *cur_exp; (j < exp->used) && (exp->tokens[j] != end_token); ++j);
-        if (j == exp->used) {
-            LOGERR(LY_EINVAL, "Invalid token used (%.*s).",
-                   __func__, exp->tok_len[*cur_exp], exp->expr + exp->expr_pos[*cur_exp]);
-            goto error;
-        }
-
-        len = (exp->expr_pos[j] + exp->tok_len[j]) - exp->expr_pos[*cur_exp];
-        *out = ly_realloc(*out, *out_used + len);
-        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
-        sprintf(*out + *out_used - 1, "%.*s", len, exp->expr + exp->expr_pos[*cur_exp]);
-        *out_used += len;
-        *cur_exp = j;
-    } else {
-        len = strlen(exp->expr + exp->expr_pos[*cur_exp]);
-        *out = ly_realloc(*out, *out_used + len);
-        LY_CHECK_ERR_GOTO(!(*out), LOGMEM, error);
-        sprintf(*out + *out_used - 1, "%.*s", len, exp->expr + exp->expr_pos[*cur_exp]);
-        *out_used += len;
-        *cur_exp = exp->used - 1;
-    }
-
-    free(str);
-    return 0;
 }
 
 API char *

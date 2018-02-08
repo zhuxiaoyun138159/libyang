@@ -40,6 +40,7 @@ setup_f(void **state)
 {
     struct state *st;
     const char *schema = TESTS_DIR"/data/files/all.yin";
+    const char *schemaimp = TESTS_DIR"/data/files/all-imp.yin";
     const char *schemadev = TESTS_DIR"/data/files/all-dev.yin";
 
     (*state) = st = calloc(1, sizeof *st);
@@ -63,6 +64,12 @@ setup_f(void **state)
     }
     lys_features_enable(st->mod, "feat2");
     lys_features_enable(st->mod, "*");
+
+    st->mod = lys_parse_path(st->ctx, schemaimp, LYS_IN_YIN);
+    if (!st->mod) {
+        fprintf(stderr, "Failed to load data model \"%s\".\n", schemaimp);
+        goto error;
+    }
 
     st->mod = lys_parse_path(st->ctx, schemadev, LYS_IN_YIN);
     if (!st->mod) {
@@ -125,7 +132,7 @@ test_parse_print_yin(void **state)
     assert_int_equal(read(fd, st->str1, s.st_size), s.st_size);
     st->str1[s.st_size] = '\0';
 
-    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YIN, NULL);
+    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YIN, NULL, 0, 0);
 
     assert_string_equal(st->str1, st->str2);
 
@@ -146,7 +153,7 @@ test_parse_print_yin(void **state)
     assert_int_equal(read(fd, st->str1, s.st_size), s.st_size);
     st->str1[s.st_size] = '\0';
 
-    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YIN, NULL);
+    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YIN, NULL, 0, 0);
 
     assert_string_equal(st->str1, st->str2);
 }
@@ -177,7 +184,7 @@ test_parse_print_yang(void **state)
     assert_int_equal(read(fd, st->str1, s.st_size), s.st_size);
     st->str1[s.st_size] = '\0';
 
-    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YANG, NULL);
+    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YANG, NULL, 0, 0);
 
     assert_string_equal(st->str1, st->str2);
 
@@ -198,7 +205,7 @@ test_parse_print_yang(void **state)
     assert_int_equal(read(fd, st->str1, s.st_size), s.st_size);
     st->str1[s.st_size] = '\0';
 
-    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YANG, NULL);
+    lys_print_mem(&(st->str2), st->mod, LYS_OUT_YANG, NULL, 0, 0);
 
     assert_string_equal(st->str1, st->str2);
 }

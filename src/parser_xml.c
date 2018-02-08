@@ -92,7 +92,7 @@ xml_get_value(struct lyd_node *node, struct lyxml_elem *xml, int editbits)
 
     /* the value is here converted to a JSON format if needed in case of LY_TYPE_IDENT and LY_TYPE_INST or to a
      * canonical form of the value */
-    if (!lyp_parse_value(&((struct lys_node_leaf *)leaf->schema)->type, &leaf->value_str, xml, leaf, NULL, 1, 0)) {
+    if (!lyp_parse_value(&((struct lys_node_leaf *)leaf->schema)->type, &leaf->value_str, xml, leaf, NULL, NULL, 1, 0)) {
         return EXIT_FAILURE;
     }
 
@@ -112,9 +112,11 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
     struct lyd_attr *dattr, *dattr_iter;
     struct lyxml_attr *attr;
     struct lyxml_elem *child, *next;
-    int i, j, havechildren, r, editbits = 0, pos, filterflag = 0, found;
+    int i, j, havechildren, r, editbits = 0, filterflag = 0, found;
+    uint8_t pos;
     int ret = 0;
     const char *str = NULL;
+    char *msg;
 
     assert(xml);
     assert(result);
@@ -214,6 +216,16 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
     case LYS_NOTIF:
     case LYS_RPC:
     case LYS_ACTION:
+        for (i = 0; xml->content && xml->content[i]; ++i) {
+            if (!is_xmlws(xml->content[i])) {
+                msg = malloc(22 + strlen(xml->content) + 1);
+                LY_CHECK_ERR_RETURN(!msg, LOGMEM, -1);
+                sprintf(msg, "node with text data \"%s\"", xml->content);
+                LOGVAL(LYE_XML_INVAL, LY_VLOG_XML, xml, msg);
+                free(msg);
+                return -1;
+            }
+        }
         *result = calloc(1, sizeof **result);
         havechildren = 1;
         break;
@@ -237,12 +249,10 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
     (*result)->schema = schema;
     (*result)->parent = parent;
     diter = NULL;
-    if (parent && parent->child && schema->nodetype == LYS_LEAF && parent->schema->nodetype == LYS_LIST &&
-        (pos = lys_is_key((struct lys_node_list *)parent->schema, (struct lys_node_leaf *)schema))) {
+    if (schema->nodetype == LYS_LEAF && lys_is_key((struct lys_node_leaf *)schema, &pos)) {
         /* it is key and we need to insert it into a correct place */
         for (i = 0, diter = parent->child;
-                diter && i < (pos - 1) && diter->schema->nodetype == LYS_LEAF &&
-                    lys_is_key((struct lys_node_list *)parent->schema, (struct lys_node_leaf *)diter->schema);
+                diter && i < pos && diter->schema->nodetype == LYS_LEAF && lys_is_key((struct lys_node_leaf *)diter->schema, NULL);
                 i++, diter = diter->next);
         if (diter) {
             /* out of order insertion - insert list's key to the correct position, before the diter */
@@ -318,7 +328,7 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
         } else if (r == 1) {
 attr_error:
             if (options & LYD_OPT_STRICT) {
-                LOGVAL(LYE_INMETA, LY_VLOG_LYD, *result, (attr->ns ? attr->ns->prefix : "<none>"), attr->name, attr->value);
+                LOGVAL(LYE_INATTR, LY_VLOG_LYD, *result, attr->name);
                 goto error;
             }
 

@@ -1637,8 +1637,15 @@ schema_nodeid_siblingcheck(const struct lys_node *sibling, const struct lys_modu
 {
     const struct lys_module *prefix_mod;
 
+    /* handle special names */
+    if (name[0] == '*') {
+        return 2;
+    } else if (name[0] == '.') {
+        return 3;
+    }
+
     /* name check */
-    if ((name[0] != '*') && (name[0] != '.') && (strncmp(name, sibling->name, nam_len) || sibling->name[nam_len])) {
+    if (strncmp(name, sibling->name, nam_len) || sibling->name[nam_len]) {
         return 1;
     }
 
@@ -1656,14 +1663,7 @@ schema_nodeid_siblingcheck(const struct lys_node *sibling, const struct lys_modu
     }
 
     /* match */
-    switch (name[0]) {
-    case '*':
-        return 2;
-    case '.':
-        return 3;
-    default:
-        return 0;
-    }
+    return 0;
 }
 
 /* keys do not have to be ordered and do not have to be all of them */
@@ -1727,25 +1727,25 @@ resolve_extended_schema_nodeid_predicate(const char *nodeid, const struct lys_no
     return 0;
 }
 
-/* start - relative, module - absolute, -1 error (logged), EXIT_SUCCESS ok
+/* start_parent - relative, module - absolute, -1 error (logged), EXIT_SUCCESS ok
  */
 int
-resolve_schema_nodeid(const char *nodeid, const struct lys_node *start, const struct lys_module *cur_module,
+resolve_schema_nodeid(const char *nodeid, const struct lys_node *start_parent, const struct lys_module *cur_module,
                       struct ly_set **ret, int extended, int no_node_error)
 {
     const char *name, *mod_name, *id;
-    const struct lys_node *sibling, *start_parent, *next, *elem;
+    const struct lys_node *sibling, *next, *elem;
     struct lys_node_augment *last_aug;
     int r, nam_len, mod_name_len = 0, is_relative = -1, all_desc, has_predicate, nodeid_end = 0;
     /* resolved import module from the start module, it must match the next node-name-match sibling */
     const struct lys_module *start_mod, *aux_mod = NULL;
     char *str;
 
-    assert(nodeid && (start || cur_module) && ret);
+    assert(nodeid && (start_parent || cur_module) && ret);
     *ret = NULL;
 
     if (!cur_module) {
-        cur_module = lys_node_module(start);
+        cur_module = lys_node_module(start_parent);
     }
     id = nodeid;
 
@@ -1757,15 +1757,14 @@ resolve_schema_nodeid(const char *nodeid, const struct lys_node *start, const st
     }
     id += r;
 
-    if (is_relative && !start) {
+    if (is_relative && !start_parent) {
         LOGINT;
         return -1;
     }
 
     /* descendant-schema-nodeid */
     if (is_relative) {
-        cur_module = start_mod = start->module;
-        start_parent = lys_parent(start);
+        cur_module = start_mod = lys_node_module(start_parent);
 
     /* absolute-schema-nodeid */
     } else {
@@ -3324,12 +3323,17 @@ check_default(struct lys_type *type, const char **value, struct lys_module *modu
     memset(&node, 0, sizeof node);
     node.value_str = dflt;
     node.value_type = type->base;
-    node.schema = calloc(1, sizeof (struct lys_node_leaf));
-    LY_CHECK_ERR_RETURN(!node.schema, LOGMEM, -1);
-    node.schema->name = strdup("fake-default");
-    LY_CHECK_ERR_RETURN(!node.schema->name, LOGMEM; free(node.schema), -1);
-    node.schema->module = module;
-    memcpy(&((struct lys_node_leaf *)node.schema)->type, type, sizeof *type);
+
+    if (tpdf) {
+        node.schema = calloc(1, sizeof (struct lys_node_leaf));
+        LY_CHECK_ERR_RETURN(!node.schema, LOGMEM, -1);
+        asprintf((char **)&node.schema->name, "typedef-%s-default", ((struct lys_tpdf *)type->parent)->name);
+        LY_CHECK_ERR_RETURN(!node.schema->name, LOGMEM; free(node.schema), -1);
+        node.schema->module = module;
+        memcpy(&((struct lys_node_leaf *)node.schema)->type, type, sizeof *type);
+    } else {
+        node.schema = (struct lys_node *)type->parent;
+    }
 
     if (type->base == LY_TYPE_LEAFREF) {
         if (!type->info.lref.target) {
@@ -3344,7 +3348,7 @@ check_default(struct lys_type *type, const char **value, struct lys_module *modu
             }
         }
     } else {
-        if (!lyp_parse_value(&((struct lys_node_leaf *)node.schema)->type, &node.value_str, NULL, &node, NULL, 1, 1)) {
+        if (!lyp_parse_value(type, &node.value_str, NULL, &node, NULL, module, 1, 1)) {
             /* possible forward reference */
             ret = 1;
             if (base_tpdf) {
@@ -3372,8 +3376,10 @@ finish:
     if (node.value_type == LY_TYPE_BITS) {
         free(node.value.bit);
     }
-    free((char *)node.schema->name);
-    free(node.schema);
+    if (tpdf) {
+        free((char *)node.schema->name);
+        free(node.schema);
+    }
 
     return ret;
 }
@@ -3936,7 +3942,7 @@ repeat:
         sleaf = sleaf->type.info.lref.target;
         goto repeat;
     } else {
-        if (!lyp_parse_value(&sleaf->type, &leaf.value_str, NULL, &leaf, NULL, 0, 0)) {
+        if (!lyp_parse_value(&sleaf->type, &leaf.value_str, NULL, &leaf, NULL, NULL, 0, 0)) {
             ret = -1;
             goto finish;
         }
@@ -4242,13 +4248,13 @@ inherit_config_flag(struct lys_node *node, int flags, int clear)
  * @brief Resolve augment target. Logs directly.
  *
  * @param[in] aug Augment to use.
- * @param[in] siblings Nodes where to start the search in. If set, uses augment, if not, standalone augment.
+ * @param[in] uses Parent where to start the search in. If set, uses augment, if not, standalone augment.
  * @param[in,out] unres List of unresolved items.
  *
  * @return EXIT_SUCCESS on success, EXIT_FAILURE on forward reference, -1 on error.
  */
 static int
-resolve_augment(struct lys_node_augment *aug, struct lys_node *siblings, struct unres_schema *unres)
+resolve_augment(struct lys_node_augment *aug, struct lys_node *uses, struct unres_schema *unres)
 {
     int rc;
     struct lys_node *sub;
@@ -4264,7 +4270,7 @@ resolve_augment(struct lys_node_augment *aug, struct lys_node *siblings, struct 
     /* it can already be resolved in case we returned EXIT_FAILURE from if block below */
     if (!aug->target) {
         /* resolve target node */
-        rc = resolve_schema_nodeid(aug->target_name, siblings, (siblings ? NULL : lys_node_module((struct lys_node *)aug)), &set, 0, 0);
+        rc = resolve_schema_nodeid(aug->target_name, uses, (uses ? NULL : lys_node_module((struct lys_node *)aug)), &set, 0, 0);
         if (rc == -1) {
             LOGVAL(LYE_PATH, LY_VLOG_LYS, aug);
             return -1;
@@ -4922,7 +4928,7 @@ resolve_uses(struct lys_node_uses *uses, struct unres_schema *unres)
 
     /* apply augments */
     for (i = 0; i < uses->augment_size; i++) {
-        rc = resolve_augment(&uses->augment[i], uses->child, unres);
+        rc = resolve_augment(&uses->augment[i], (struct lys_node *)uses, unres);
         if (rc) {
             goto fail;
         }
@@ -5619,7 +5625,7 @@ resolve_list_keys(struct lys_node_list *list, const char *keys_str)
             assert(ly_err_main.vlog_hide);
             ly_vlog_hide(0);
             LOGWRN("Default value \"%s\" in the list key \"%s\" is ignored. (%s)", list->keys[i]->dflt,
-                   list->keys[i]->name, s = lys_path((struct lys_node*)list));
+                   list->keys[i]->name, s = lys_path((struct lys_node*)list, LYS_PATH_FIRST_PREFIX));
             ly_vlog_hide(1);
             free(s);
         }
@@ -6264,10 +6270,12 @@ check_leafref_features(struct lys_type *type)
         if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
             continue;
         }
-        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT) && lys_node_module(iter->parent)->implemented) {
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT)) {
             aug = (struct lys_node_augment *)iter->parent;
-            if ((aug->flags & LYS_NOTAPPLIED) || !aug->target) {
+            if ((aug->module->implemented && (aug->flags & LYS_NOTAPPLIED)) || !aug->target) {
                 /* unresolved augment, wait until it's resolved */
+                LOGVAL(LYE_SPEC, LY_VLOG_LYS, aug,
+                       "Cannot check leafref \"%s\" if-feature consistency because of an unresolved augment.", type->info.lref.path);
                 ret = EXIT_FAILURE;
                 goto cleanup;
             }
@@ -6279,10 +6287,12 @@ check_leafref_features(struct lys_type *type)
         if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
             continue;
         }
-        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT) && lys_node_module(iter->parent)->implemented) {
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT)) {
             aug = (struct lys_node_augment *)iter->parent;
-            if ((aug->flags & LYS_NOTAPPLIED) || !aug->target) {
+            if ((aug->module->implemented && (aug->flags & LYS_NOTAPPLIED)) || !aug->target) {
                 /* unresolved augment, wait until it's resolved */
+                LOGVAL(LYE_SPEC, LY_VLOG_LYS, aug,
+                       "Cannot check leafref \"%s\" if-feature consistency because of an unresolved augment.", type->info.lref.path);
                 ret = EXIT_FAILURE;
                 goto cleanup;
             }
@@ -7611,7 +7621,7 @@ resolve_union(struct lyd_node_leaf_list *leaf, struct lys_type *type, int store,
                         leaf->value_type = LY_TYPE_LEAFREF;
                     } else {
                         /* valid unresolved */
-                        if (!lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, 1, 0)) {
+                        if (!lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0)) {
                             return -1;
                         }
                     }
@@ -7660,7 +7670,7 @@ resolve_union(struct lyd_node_leaf_list *leaf, struct lys_type *type, int store,
             }
             break;
         default:
-            if (lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, store, 0)) {
+            if (lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, NULL, store, 0)) {
                 success = 1;
             }
             break;
@@ -7754,7 +7764,7 @@ resolve_unres_data_item(struct lyd_node *node, enum UNRES_ITEM type, int ignore_
             } else {
                 /* valid unresolved */
                 if (!(leaf->value_type & LY_TYPE_LEAFREF_UNRES)) {
-                    if (!lyp_parse_value(&sleaf->type, &leaf->value_str, NULL, leaf, NULL, 1, 0)) {
+                    if (!lyp_parse_value(&sleaf->type, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0)) {
                         return -1;
                     }
                 }
