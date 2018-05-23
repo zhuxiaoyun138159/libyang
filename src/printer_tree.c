@@ -94,14 +94,14 @@ tree_sibling_is_valid_child(const struct lys_node *node, int including, const st
         }
 
         if (!lys_is_disabled(cur, 0)) {
-            if (cur->nodetype == LYS_USES) {
+            if ((cur->nodetype == LYS_USES) || ((cur->nodetype == LYS_CASE) && (cur->flags & LYS_IMPLICIT))) {
                 if (tree_sibling_is_valid_child(cur->child, 1, module, NULL, nodetype)) {
                     return 1;
                 }
             } else {
                 switch (nodetype) {
                 case LYS_GROUPING:
-                    /* we are printing groupings, they are printer separately */
+                    /* we are printing groupings, they are printed separately */
                     if (cur->nodetype == LYS_GROUPING) {
                         return 0;
                     }
@@ -151,7 +151,7 @@ tree_next_indent(int level, const struct lys_node *node, const struct lys_node *
     int next_is_case = 0, has_next = 0;
 
     if (level > 64) {
-        LOGINT;
+        LOGINT(node->module->ctx);
         return;
     }
 
@@ -318,7 +318,7 @@ tree_print_type(struct lyout *out, const struct lys_type *type, int options, con
                 if (out_str) {
                     printed = 3 + strlen(str);
                     tmp = malloc(printed + 1);
-                    LY_CHECK_ERR_RETURN(!tmp, LOGMEM, 0);
+                    LY_CHECK_ERR_RETURN(!tmp, LOGMEM(type_mod->ctx), 0);
                     sprintf(tmp, "-> %s", str);
                     *out_str = lydict_insert_zc(type_mod->ctx, tmp);
                 } else {
@@ -329,7 +329,7 @@ tree_print_type(struct lyout *out, const struct lys_type *type, int options, con
                 if (out_str) {
                     printed = 3 + strlen(type->info.lref.path);
                     tmp = malloc(printed + 1);
-                    LY_CHECK_ERR_RETURN(!tmp, LOGMEM, 0);
+                    LY_CHECK_ERR_RETURN(!tmp, LOGMEM(type_mod->ctx), 0);
                     sprintf(tmp, "-> %s", type->info.lref.path);
                     *out_str = lydict_insert_zc(type_mod->ctx, tmp);
                 } else {
@@ -343,7 +343,7 @@ tree_print_type(struct lyout *out, const struct lys_type *type, int options, con
             if (out_str) {
                 printed = strlen(str) + 1 + strlen(type->der->name);
                 tmp = malloc(printed + 1);
-                LY_CHECK_ERR_RETURN(!tmp, LOGMEM, 0);
+                LY_CHECK_ERR_RETURN(!tmp, LOGMEM(type_mod->ctx), 0);
                 sprintf(tmp, "%s:%s", str, type->der->name);
                 *out_str = lydict_insert_zc(type_mod->ctx, tmp);
             } else {
@@ -353,7 +353,7 @@ tree_print_type(struct lyout *out, const struct lys_type *type, int options, con
             if (out_str) {
                 printed = strlen(type->der->module->name) + 1 + strlen(type->der->name);
                 tmp = malloc(printed + 1);
-                LY_CHECK_ERR_RETURN(!tmp, LOGMEM, 0);
+                LY_CHECK_ERR_RETURN(!tmp, LOGMEM(type_mod->ctx), 0);
                 sprintf(tmp, "%s:%s", type->der->module->name, type->der->name);
                 *out_str = lydict_insert_zc(type_mod->ctx, tmp);
             } else {
@@ -418,7 +418,7 @@ tree_print_features(struct lyout *out, struct lys_iffeature *iff1, uint8_t iff1_
 
     if (out_str) {
         o = malloc(sizeof *o);
-        LY_CHECK_ERR_RETURN(!o, LOGMEM, 0);
+        LY_CHECK_ERR_RETURN(!o, LOGMEM(NULL), 0);
         o->type = LYOUT_MEMORY;
         o->method.mem.buf = NULL;
         o->method.mem.len = 0;
@@ -462,7 +462,7 @@ tree_print_keys(struct lyout *out, struct lys_node_leaf **keys, uint8_t keys_siz
 
     if (out_str) {
         o = malloc(sizeof *o);
-        LY_CHECK_ERR_RETURN(!o, LOGMEM, 0);
+        LY_CHECK_ERR_RETURN(!o, LOGMEM(NULL), 0);
         o->type = LYOUT_MEMORY;
         o->method.mem.buf = NULL;
         o->method.mem.len = 0;
@@ -510,9 +510,11 @@ tree_print_snode(struct lyout *out, int level, uint16_t max_name_len, const stru
         return;
     }
 
-    /* implicit input/output */
-    if (((node->nodetype & mask) & (LYS_INPUT | LYS_OUTPUT)) && (node->flags & LYS_IMPLICIT)) {
-        return;
+    /* implicit input/output/case */
+    if (((node->nodetype & mask) & (LYS_INPUT | LYS_OUTPUT | LYS_CASE)) && (node->flags & LYS_IMPLICIT)) {
+        if ((node->nodetype != LYS_CASE) || lys_is_disabled(node->child, 0)) {
+            return;
+        }
     }
 
     /* special uses and grouping handling */
@@ -737,6 +739,11 @@ print_children:
         child_mask = LYS_CHOICE | LYS_CONTAINER | LYS_LEAF | LYS_LEAFLIST | LYS_LIST | LYS_ANYDATA | LYS_USES | LYS_ACTION | LYS_NOTIF;
         max_child_len = tree_get_max_name_len(node->child, NULL, child_mask, opts);
         break;
+    default:
+        child_mask = 0;
+        max_child_len = 0;
+        LOGINT(node->module->ctx);
+        break;
     }
 
     /* print descendants (children) */
@@ -846,7 +853,7 @@ int
 tree_print_model(struct lyout *out, const struct lys_module *module, const char *target_schema_path,
                  int ll, int options)
 {
-    struct lys_node *node, *data;
+    struct lys_node *node = NULL, *data;
     struct ly_set *set;
     uint16_t max_child_len;
     int have_rpcs = 0, have_notifs = 0, have_grps = 0, have_augs = 0, printed;
@@ -865,11 +872,11 @@ tree_print_model(struct lyout *out, const struct lys_module *module, const char 
         if (!set) {
             return EXIT_FAILURE;
         } else if (set->number != 1) {
-            LOGVAL(LYE_PATH_INNODE, LY_VLOG_NONE, NULL);
+            LOGVAL(module->ctx, LYE_PATH_INNODE, LY_VLOG_NONE, NULL);
             if (set->number == 0) {
-                LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL, "Schema path \"%s\" did not match any nodes.", target_schema_path);
+                LOGVAL(module->ctx, LYE_SPEC, LY_VLOG_PREV, NULL, "Schema path \"%s\" did not match any nodes.", target_schema_path);
             } else {
-                LOGVAL(LYE_SPEC, LY_VLOG_PREV, NULL, "Schema path \"%s\" matched more nodes.", target_schema_path);
+                LOGVAL(module->ctx, LYE_SPEC, LY_VLOG_PREV, NULL, "Schema path \"%s\" matched more nodes.", target_schema_path);
             }
             ly_set_free(set);
             return EXIT_FAILURE;

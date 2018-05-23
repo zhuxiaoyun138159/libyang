@@ -30,4 +30,3 @@ addons:
 script:
   # do nothing, everything here is done in coverity addon
   - true
-

@@ -47,7 +47,7 @@ class Ident;
 class Value
 {
 public:
-    Value(lyd_val value, uint16_t value_type, S_Deleter deleter);
+    Value(lyd_val value, LY_DATA_TYPE* value_type, uint8_t value_flags, S_Deleter deleter);
     ~Value();
     const char *binary() {return LY_TYPE_BINARY == type ? value.binary : throw "wrong type";};
     //struct lys_type_bit **bit();
@@ -71,7 +71,8 @@ public:
 
 private:
     lyd_val value;
-    uint16_t type;
+    LY_DATA_TYPE type;
+    uint8_t flags;
     S_Deleter deleter;
 };
 
@@ -140,6 +141,8 @@ public:
     S_Deleter swig_deleter() {return deleter;};
 
     friend Set;
+    friend Data_Node_Anydata;
+    friend Data_Node_Leaf_List;
 
     /* for libnetconf2 */
     struct lyd_node *C_lyd_node() {return node;};
@@ -154,6 +157,7 @@ S_Data_Node create_new_Data_Node(struct lyd_node *node);
 class Data_Node_Leaf_List : public Data_Node
 {
 public:
+    Data_Node_Leaf_List(S_Data_Node derived);
     Data_Node_Leaf_List(struct lyd_node *node, S_Deleter deleter = nullptr);
     ~Data_Node_Leaf_List();
     const char *value_str() {return ((struct lyd_node_leaf_list *) node)->value_str;};
@@ -174,6 +178,7 @@ private:
 class Data_Node_Anydata : public Data_Node
 {
 public:
+    Data_Node_Anydata(S_Data_Node derived);
     Data_Node_Anydata(struct lyd_node *node, S_Deleter deleter = nullptr);
     ~Data_Node_Anydata();
     LYD_ANYDATA_VALUETYPE value_type() {return ((struct lyd_node_anydata *) node)->value_type;};

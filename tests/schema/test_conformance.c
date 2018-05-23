@@ -73,7 +73,7 @@ test_implemented1_yin(void **state)
     b2 = lys_parse_path(ctx, SCHEMA_FOLDER_YIN"/b@2015-04-04.yin", LYS_IN_YIN);
     assert_ptr_equal(b2, NULL);
     assert_int_equal(ly_errno, LY_EINVAL);
-    assert_string_equal(ly_errmsg(), "Module \"b\" parsing failed.");
+    assert_string_equal(ly_errmsg(ctx), "Module \"b\" parsing failed.");
 
     /* older c can be loaded and it will be marked as implemented */
     c2 = lys_parse_path(ctx, SCHEMA_FOLDER_YIN"/c@2015-01-01.yin", LYS_IN_YIN);
@@ -107,7 +107,7 @@ test_implemented1_yang(void **state)
     b2 = lys_parse_path(ctx, SCHEMA_FOLDER_YANG"/b@2015-04-04.yang", LYS_IN_YANG);
     assert_ptr_equal(b2, NULL);
     assert_int_equal(ly_errno, LY_EINVAL);
-    assert_string_equal(ly_errmsg(), "Module \"b\" parsing failed.");
+    assert_string_equal(ly_errmsg(ctx), "Module \"b\" parsing failed.");
 
     /* older c can be loaded and it will be marked as implemented */
     c2 = lys_parse_path(ctx, SCHEMA_FOLDER_YANG"/c@2015-01-01.yang", LYS_IN_YANG);
@@ -438,6 +438,114 @@ test_implemented_info_yang(void **state)
     free(data);
 }
 
+static void
+test_revision_date_yin(void **state)
+{
+    struct ly_ctx *ctx = *state;
+    const char *yin1 = "<module name=\"x\""
+          "xmlns=\"urn:ietf:params:xml:ns:yang:yin:1\""
+          "xmlns:x=\"urn:cesnet:x\">"
+        "<namespace uri=\"urn:cesnet:x\"/>"
+        "<prefix value=\"x\"/>"
+        "<revision date=\"2018-02-29\"/>"
+        "</module>";
+    const char *yin2 = "<module name=\"x\""
+          "xmlns=\"urn:ietf:params:xml:ns:yang:yin:1\""
+          "xmlns:x=\"urn:cesnet:x\">"
+        "<namespace uri=\"urn:cesnet:x\"/>"
+        "<prefix value=\"x\"/>"
+        "<revision date=\"18-02-28\"/>"
+        "</module>";
+    const char *yin3 = "<module name=\"x\""
+          "xmlns=\"urn:ietf:params:xml:ns:yang:yin:1\""
+          "xmlns:x=\"urn:cesnet:x\">"
+        "<namespace uri=\"urn:cesnet:x\"/>"
+        "<prefix value=\"x\"/>"
+        "<revision date=\"today\"/>"
+        "</module>";
+    const char *yin4 = "<module name=\"x\""
+          "xmlns=\"urn:ietf:params:xml:ns:yang:yin:1\""
+          "xmlns:x=\"urn:cesnet:x\">"
+        "<namespace uri=\"urn:cesnet:x\"/>"
+        "<prefix value=\"x\"/>"
+        "<revision date=\"2018-02-28\"/>"
+        "</module>";
+    const char *yin5 = "<module name=\"y\""
+          "xmlns=\"urn:ietf:params:xml:ns:yang:yin:1\""
+          "xmlns:y=\"urn:cesnet:y\">"
+        "<namespace uri=\"urn:cesnet:y\"/>"
+        "<prefix value=\"y\"/>"
+        "<revision date=\"2016-02-29\"/>"
+        "</module>";
+    const char *yin6 = "<module name=\"z\""
+          "xmlns=\"urn:ietf:params:xml:ns:yang:yin:1\""
+          "xmlns:z=\"urn:cesnet:z\">"
+        "<namespace uri=\"urn:cesnet:z\"/>"
+        "<prefix value=\"z\"/>"
+        "<revision date=\"2000-02-29\"/>"
+        "</module>";
+
+    /* invalid dates */
+    assert_ptr_equal(lys_parse_mem(ctx, yin1, LYS_IN_YIN), NULL);
+    assert_int_equal(ly_vecode(ctx), LYVE_INDATE);
+
+    assert_ptr_equal(lys_parse_mem(ctx, yin2, LYS_IN_YIN), NULL);
+    assert_int_equal(ly_vecode(ctx), LYVE_INDATE);
+
+    assert_ptr_equal(lys_parse_mem(ctx, yin3, LYS_IN_YIN), NULL);
+    assert_int_equal(ly_vecode(ctx), LYVE_INDATE);
+
+    /* valid dates */
+    assert_ptr_not_equal(lys_parse_mem(ctx, yin4, LYS_IN_YIN), NULL);
+    assert_ptr_not_equal(lys_parse_mem(ctx, yin5, LYS_IN_YIN), NULL);
+    assert_ptr_not_equal(lys_parse_mem(ctx, yin6, LYS_IN_YIN), NULL);
+}
+
+static void
+test_revision_date_yang(void **state)
+{
+    struct ly_ctx *ctx = *state;
+    const char *yang1 = "module x {"
+          "namespace urn:cesnet:x;"
+          "prefix x;"
+          "revision \"2018-02-29\";}";
+    const char *yang2 = "module x {"
+          "namespace urn:cesnet:x;"
+          "prefix x;"
+          "revision \"18-02-28\";}";
+    const char *yang3 = "module x {"
+          "namespace urn:cesnet:x;"
+          "prefix x;"
+          "revision \"today\";}";
+    const char *yang4 = "module x {"
+          "namespace urn:cesnet:x;"
+          "prefix x;"
+          "revision \"2018-02-28\";}";
+    const char *yang5 = "module y {"
+          "namespace urn:cesnet:y;"
+          "prefix y;"
+          "revision \"2016-02-29\";}";
+    const char *yang6 = "module z {"
+          "namespace urn:cesnet:z;"
+          "prefix z;"
+          "revision \"2000-02-29\";}";
+
+    /* invalid dates */
+    assert_ptr_equal(lys_parse_mem(ctx, yang1, LYS_IN_YANG), NULL);
+    assert_int_equal(ly_vecode(ctx), LYVE_INDATE);
+
+    assert_ptr_equal(lys_parse_mem(ctx, yang2, LYS_IN_YANG), NULL);
+    assert_int_equal(ly_vecode(ctx), LYVE_INDATE);
+
+    assert_ptr_equal(lys_parse_mem(ctx, yang3, LYS_IN_YANG), NULL);
+    assert_int_equal(ly_vecode(ctx), LYVE_INDATE);
+
+    /* valid dates */
+    assert_ptr_not_equal(lys_parse_mem(ctx, yang4, LYS_IN_YANG), NULL);
+    assert_ptr_not_equal(lys_parse_mem(ctx, yang5, LYS_IN_YANG), NULL);
+    assert_ptr_not_equal(lys_parse_mem(ctx, yang6, LYS_IN_YANG), NULL);
+}
+
 int
 main(void)
 {
@@ -448,6 +556,8 @@ main(void)
         cmocka_unit_test_setup_teardown(test_implemented2_yang, setup_ctx, teardown_ctx),
         cmocka_unit_test_setup_teardown(test_implemented_info_yin, setup_ctx, teardown_ctx),
         cmocka_unit_test_setup_teardown(test_implemented_info_yang, setup_ctx, teardown_ctx),
+        cmocka_unit_test_setup_teardown(test_revision_date_yin, setup_ctx, teardown_ctx),
+        cmocka_unit_test_setup_teardown(test_revision_date_yang, setup_ctx, teardown_ctx),
     };
 
     return cmocka_run_group_tests(cmut, NULL, NULL);

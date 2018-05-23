@@ -11,7 +11,7 @@ set(CMAKE_MACOSX_RPATH TRUE)
 # set version
 set(LIBYANG_MAJOR_VERSION 0)
 set(LIBYANG_MINOR_VERSION 15)
-set(LIBYANG_MICRO_VERSION 18)
+set(LIBYANG_MICRO_VERSION 102)
 set(LIBYANG_VERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION}.${LIBYANG_MICRO_VERSION})
 set(LIBYANG_SOVERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION})
 
@@ -20,7 +20,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE debug)
 endif()
 
-set(CMAKE_C_FLAGS         "${CMAKE_C_FLAGS} -Wall -Wextra")
+set(CMAKE_C_FLAGS         "${CMAKE_C_FLAGS} -Wall -Wextra -std=gnu11")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_C_FLAGS_PACKAGE "-g -O2 -DNDEBUG")
 set(CMAKE_C_FLAGS_DEBUG   "-g -O0")
@@ -35,7 +35,8 @@ else()
 endif()
 option(ENABLE_CALLGRIND_TESTS "Build performance tests to be run with callgrind" OFF)
 option(ENABLE_LATEST_REVISIONS "Enable reusing of latest revisions of schemas" ON)
-option(ENABLE_CACHE "Enable data caching for schemas (time-efficient at the cost of increased space-complexity)" OFF)
+option(ENABLE_CACHE "Enable data caching for schemas (time-efficient at the cost of increased space-complexity)" ON)
+set(PLUGINS_DIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libyang" CACHE STRING "Directory with libyang plugins (extensions and user types)")
 
 if (ENABLE_LATEST_REVISIONS)
     set(ENABLE_LATEST_REVISIONS_MACRO "/**\n * @brief Latest revisions of loaded schemas will be reused.\n */\n#define LY_ENABLED_LATEST_REVISIONS")
@@ -49,15 +50,33 @@ else()
     set(ENABLE_CACHE_MACRO "/**\n * @brief Cache of some temporary information will not be used.\n */")
 endif()
 
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    # require at least gcc 4.9
+    if (CMAKE_C_COMPILER_VERSION VERSION_LESS 4.9)
+        message(FATAL_ERROR "GCC version must be at least 4.9!")
+    endif()
+    set(COMPILER_UNUSED_ATTR "UNUSED_ ## x __attribute__((__unused__))")
+    set(COMPILER_PACKED_ATTR "__attribute__((__packed__))")
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    # require at least clang 3.0
+    if (CMAKE_C_COMPILER_VERSION VERSION_LESS 3.0)
+        message(FATAL_ERROR "Clang version must be at least 3.0!")
+    endif()
+    set(COMPILER_UNUSED_ATTR "UNUSED_ ## x __attribute__((__unused__))")
+    set(COMPILER_PACKED_ATTR "__attribute__((__packed__))")
+else()
+    message(WARNING "You are using an unknown compiler, it must support C11 standard \"_Generic\" statement.")
+    set(COMPILER_UNUSED_ATTR "UNUSED_ ## x")
+    set(COMPILER_PACKED_ATTR "")
+endif()
+
 include_directories(${PROJECT_BINARY_DIR}/src ${PROJECT_SOURCE_DIR}/src)
 configure_file(${PROJECT_SOURCE_DIR}/src/libyang.h.in ${PROJECT_BINARY_DIR}/src/libyang.h @ONLY)
+configure_file(${PROJECT_SOURCE_DIR}/src/common.h.in ${PROJECT_BINARY_DIR}/src/common.h @ONLY)
 
-if(PLUGINS_DIR)
-    set(LIBYANG_EXT_PLUGINS_DIR ${PLUGINS_DIR})
-else()
-    set(LIBYANG_EXT_PLUGINS_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libyang)
-endif()
-configure_file(${PROJECT_SOURCE_DIR}/src/extensions_config.h.in ${PROJECT_BINARY_DIR}/src/extensions_config.h)
+set(EXTENSIONS_PLUGINS_DIR_MACRO "${PLUGINS_DIR}/extensions")
+set(USER_TYPES_PLUGINS_DIR_MACRO "${PLUGINS_DIR}/user_types")
+configure_file(${PROJECT_SOURCE_DIR}/src/plugin_config.h.in ${PROJECT_BINARY_DIR}/src/plugin_config.h)
 
 # include custom Modules
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
@@ -72,9 +91,9 @@ set(GEN_JAVASCRIPT_BINDINGS 0 CACHE BOOL "Enable JavaScript bindings.")
 
 find_package(FLEX)
 find_package(BISON)
-find_program (DEB_BUILDER NAMES debuild)
-find_program (RPM_BUILDER NAMES rpmbuild)
-find_program (SED_TOOL NAMES sed)
+find_program(DEB_BUILDER NAMES debuild)
+find_program(RPM_BUILDER NAMES rpmbuild)
+find_program(SED_TOOL NAMES sed)
 
 if(NOT BISON_FOUND)
     message(WARNING "Missing Bison.\nYou won't be able to generate source codes from changed flex/bison files.\nCompiling libyang should still works fine.")
@@ -115,11 +134,13 @@ endif()
 
 if ($ENV{TRAVIS_BRANCH} STREQUAL "master")
     set(PACKAGE_NAME "libyang")
+    set(PACKAGE_PART_NAME "")
     set(BRANCH "master")
     set(BUILD_TYPE "Package")
     set(CONFLICT_PACKAGE_NAME "libyang-experimental")
 else ()
     set(PACKAGE_NAME "libyang-experimental")
+    set(PACKAGE_PART_NAME "-experimental")
     set(BRANCH "devel")
     set(BUILD_TYPE "debug")
     set(CONFLICT_PACKAGE_NAME "libyang")
@@ -162,7 +183,7 @@ set(libsrc
     src/common.c
     src/context.c
     src/log.c
-    src/dict.c
+    src/hash_table.c
     src/resolve.c
     src/validation.c
     src/xml.c
@@ -175,7 +196,7 @@ set(libsrc
     src/parser_yang.c
     src/tree_schema.c
     src/tree_data.c
-    src/extensions.c
+    src/plugins.c
     src/printer.c
     src/xpath.c
     src/printer_yang.c
@@ -204,6 +225,7 @@ set(headers
     src/tree_schema.h
     src/tree_data.h
     src/extensions.h
+    src/user_types.h
     src/xml.h
     src/dict.h)
 
@@ -268,6 +290,9 @@ add_custom_target(cclean
 # YANG extensions plugins
 add_subdirectory(src/extensions)
 
+# YANG user types plugins
+add_subdirectory(src/user_types)
+
 # yanglint
 add_executable(yanglint ${lintsrc})
 target_link_libraries(yanglint yang)
@@ -291,6 +316,9 @@ if(ENABLE_BUILD_TESTS)
     if(CMOCKA_FOUND)
         enable_testing()
         add_subdirectory(tests)
+    else(CMOCKA_FOUND)
+        message(STATUS "Disabling tests because of missing CMocka")
+        set(ENABLE_BUILD_TESTS NO)
     endif(CMOCKA_FOUND)
 endif(ENABLE_BUILD_TESTS)
 

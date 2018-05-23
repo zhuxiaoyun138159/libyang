@@ -393,7 +393,7 @@ int_range:
         break;
     default:
         /* unused outside libyang, we never should be here */
-        LOGINT;
+        LOGINT(type->parent->module->ctx);
         ly_print(out, "%-*s%s\n", INDENT_LEN, "Base type: ", "UNKNOWN");
         break;
     }
@@ -736,7 +736,7 @@ info_print_module(struct lyout *out, const struct lys_module *module)
     info_print_text(out, module->ref, "Reference: ");
     info_print_text(out, module->org, "Org: ");
     info_print_text(out, module->contact, "Contact: ");
-    ly_print(out, "%-*s%s\n", INDENT_LEN, "YANG ver: ", (module->version == 2 ? "1.1" : "1.0"));
+    ly_print(out, "%-*s%s\n", INDENT_LEN, "YANG ver: ", (module->version == LYS_VERSION_1_1 ? "1.1" : "1.0"));
     ly_print(out, "%-*s%s\n", INDENT_LEN, "Deviated: ", (module->deviated ? "yes" : "no"));
     ly_print(out, "%-*s%s\n", INDENT_LEN, "Implement: ", (module->implemented ? "yes" : "no"));
     info_print_text(out, module->filepath, "URI: file://");
@@ -1077,7 +1077,7 @@ info_print_model(struct lyout *out, const struct lys_module *module, const char 
                         tpdf_size = ((struct lys_node_grp *)target)->tpdf_size;
                         break;
                     default:
-                        LOGINT;
+                        LOGINT(module->ctx);
                         return EXIT_FAILURE;
                     }
                 }
