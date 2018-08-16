@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 2.8.12)
 project(libyang C)
 
 include(GNUInstallDirs)
+include(CheckSymbolExists)
 
 set(LIBYANG_DESCRIPTION "libyang is YANG data modelling language parser and toolkit written (and providing API) in C.")
 
@@ -10,8 +11,8 @@ set(CMAKE_MACOSX_RPATH TRUE)
 
 # set version
 set(LIBYANG_MAJOR_VERSION 0)
-set(LIBYANG_MINOR_VERSION 15)
-set(LIBYANG_MICRO_VERSION 103)
+set(LIBYANG_MINOR_VERSION 16)
+set(LIBYANG_MICRO_VERSION 6)
 set(LIBYANG_VERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION}.${LIBYANG_MICRO_VERSION})
 set(LIBYANG_SOVERSION ${LIBYANG_MAJOR_VERSION}.${LIBYANG_MINOR_VERSION})
 
@@ -34,20 +35,20 @@ else()
     option(ENABLE_VALGRIND_TESTS "Build tests with valgrind" OFF)
 endif()
 option(ENABLE_CALLGRIND_TESTS "Build performance tests to be run with callgrind" OFF)
+
+option(ENABLE_CACHE "Enable data caching for schemas and hash tables for data (time-efficient at the cost of increased space-complexity)" ON)
 option(ENABLE_LATEST_REVISIONS "Enable reusing of latest revisions of schemas" ON)
-option(ENABLE_CACHE "Enable data caching for schemas (time-efficient at the cost of increased space-complexity)" ON)
+option(ENABLE_LYD_PRIV "Add a private pointer also to struct lyd_node (data node structure), just like in struct lys_node, for arbitrary user data" OFF)
 set(PLUGINS_DIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/libyang" CACHE STRING "Directory with libyang plugins (extensions and user types)")
 
-if (ENABLE_LATEST_REVISIONS)
-    set(ENABLE_LATEST_REVISIONS_MACRO "/**\n * @brief Latest revisions of loaded schemas will be reused.\n */\n#define LY_ENABLED_LATEST_REVISIONS")
-else()
-    set(ENABLE_LATEST_REVISIONS_MACRO "/**\n * @brief Latest revisions of loaded schemas will not be reused and always reloaded.\n */")
-endif()
-
 if(ENABLE_CACHE)
-    set(ENABLE_CACHE_MACRO "/**\n * @brief Cache of some temporary information will be used.\n */\n#define LY_ENABLED_CACHE")
-else()
-    set(ENABLE_CACHE_MACRO "/**\n * @brief Cache of some temporary information will not be used.\n */")
+    set(LY_ENABLED_CACHE 1)
+endif()
+if(ENABLE_LATEST_REVISIONS)
+    set(LY_ENABLED_LATEST_REVISIONS 1)
+endif()
+if(ENABLE_LYD_PRIV)
+    set(LY_ENABLED_LYD_PRIV 1)
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
@@ -76,7 +77,6 @@ configure_file(${PROJECT_SOURCE_DIR}/src/common.h.in ${PROJECT_BINARY_DIR}/src/c
 
 set(EXTENSIONS_PLUGINS_DIR_MACRO "${PLUGINS_DIR}/extensions")
 set(USER_TYPES_PLUGINS_DIR_MACRO "${PLUGINS_DIR}/user_types")
-configure_file(${PROJECT_SOURCE_DIR}/src/plugin_config.h.in ${PROJECT_BINARY_DIR}/src/plugin_config.h)
 
 # include custom Modules
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
@@ -174,6 +174,10 @@ else ()
     configure_file(${PROJECT_SOURCE_DIR}/packages/local-rpm.sh.in ${PROJECT_BINARY_DIR}/build-packages/local-rpm.sh @ONLY)
 endif()
 
+# by default build shared library
+# static build requires static libpcre library
+option(ENABLE_STATIC "Build static (.a) library" OFF)
+
 # check the supported platform
 if(NOT UNIX)
     message(FATAL_ERROR "Only *nix like systems are supported.")
@@ -191,6 +195,7 @@ set(libsrc
     src/parser_yin.c
     src/parser_xml.c
     src/parser_json.c
+    src/parser_lyb.c
     src/parser_yang_bis.c
     src/parser_yang_lex.c
     src/parser_yang.c
@@ -201,10 +206,12 @@ set(libsrc
     src/xpath.c
     src/printer_yang.c
     src/printer_yin.c
+    src/printer_json_schema.c
     src/printer_xml.c
     src/printer_tree.c
     src/printer_info.c
     src/printer_json.c
+    src/printer_lyb.c
     src/yang_types.c)
 
 set(lintsrc
@@ -229,24 +236,45 @@ set(headers
     src/xml.h
     src/dict.h)
 
-set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-add_library(yangobj OBJECT ${libsrc})
-add_library(yang SHARED $<TARGET_OBJECTS:yangobj>)
+check_symbol_exists(vdprintf stdio.h HAVE_VDPRINTF)
+if(HAVE_VDPRINTF)
+    add_definitions(-DHAVE_VDPRINTF)
+endif(HAVE_VDPRINTF)
+
+# create static libyang library
+if(ENABLE_STATIC)
+    add_definitions(-DSTATIC)
+    set(CMAKE_EXE_LINKER_FLAGS -static)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+    set(CMAKE_EXE_LINK_DYNAMIC_C_FLAGS)       # remove -Wl,-Bdynamic
+    set(CMAKE_EXE_LINK_DYNAMIC_CXX_FLAGS)
+    add_library(yang STATIC ${libsrc})
+else()
+    set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+    add_library(yangobj OBJECT ${libsrc})
+    add_library(yang SHARED $<TARGET_OBJECTS:yangobj>)
+
+    #link dl
+    target_link_libraries(yang ${CMAKE_DL_LIBS})
+endif(ENABLE_STATIC)
+
 set_target_properties(yang PROPERTIES VERSION ${LIBYANG_VERSION} SOVERSION ${LIBYANG_SOVERSION})
 set_target_properties(yang PROPERTIES COMPILE_FLAGS "-fvisibility=hidden")
 
 # link math
 target_link_libraries(yang m)
 
-#link dl
-target_link_libraries(yang ${CMAKE_DL_LIBS})
-
 # find pthreads
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 find_package(Threads REQUIRED)
-target_link_libraries(yang ${CMAKE_THREAD_LIBS_INIT})
+if(ENABLE_STATIC)
+    target_link_libraries(yang -Wl,--whole-archive ${CMAKE_THREAD_LIBS_INIT} -Wl,--no-whole-archive)
+else()
+    target_link_libraries(yang ${CMAKE_THREAD_LIBS_INIT})
+endif(ENABLE_STATIC)
 
 # find PCRE library
+unset(PCRE_LIBRARY CACHE)
 find_package(PCRE REQUIRED)
 include_directories(${PCRE_INCLUDE_DIRS})
 target_link_libraries(yang ${PCRE_LIBRARIES})
@@ -262,6 +290,8 @@ if(PKG_CONFIG_FOUND)
     # check that pkg-config includes the used path
     execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE} --variable pc_path pkg-config RESULT_VARIABLE RETURN OUTPUT_VARIABLE PC_PATH ERROR_QUIET)
     if(RETURN EQUAL 0)
+	string(STRIP "${PC_PATH}" PC_PATH)
+	set(PC_PATH "${PC_PATH}:$ENV{PKG_CONFIG_PATH}")
         string(REGEX MATCH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/pkgconfig" SUBSTR "${PC_PATH}")
         string(LENGTH "${SUBSTR}" SUBSTR_LEN)
         if(SUBSTR_LEN EQUAL 0)
@@ -288,10 +318,50 @@ add_custom_target(cclean
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # YANG extensions plugins
-add_subdirectory(src/extensions)
+set(EXTENSIONS_LIST "nacm" "metadata" "yangdata")
+# if the tests are enabled, build libyang_ext_test
+if(ENABLE_BUILD_TESTS)
+    find_package(CMocka 1.0.0)
+    if(CMOCKA_FOUND AND CMAKE_BUILD_TYPE MATCHES debug)
+        list(APPEND EXTENSIONS_LIST "libyang_ext_test")
+    endif(CMOCKA_FOUND AND CMAKE_BUILD_TYPE MATCHES debug)
+endif(ENABLE_BUILD_TESTS)
 
-# YANG user types plugins
-add_subdirectory(src/user_types)
+if(ENABLE_STATIC)
+    set(EXTENSIONS_LIST_SIZE " 0 ")
+    set(ITEM 0)
+    foreach(EXTENSION ${EXTENSIONS_LIST})
+        add_library(${EXTENSION} STATIC "src/extensions/${EXTENSION}.c")
+        target_link_libraries(yang ${EXTENSION})
+        set(EXTENSIONS_LIST_SIZE "${EXTENSIONS_LIST_SIZE} + lyext_size(${EXTENSION})")
+        set(EXTERN_EXTENSIONS_LIST "${EXTERN_EXTENSIONS_LIST}extern struct lyext_plugin_list ${EXTENSION}[];\n")
+        set(MEMCPY_EXTENSIONS_LIST "${MEMCPY_EXTENSIONS_LIST}    lyext_add(plugin, count, ${EXTENSION});\n")
+        set(STATIC_LOADED_PLUGINS "${STATIC_LOADED_PLUGINS} \"${EXTENSION}\",")
+        MATH(EXPR ITEM "${ITEM}+1")
+    endforeach()
+else()
+    add_subdirectory(src/extensions)
+endif(ENABLE_STATIC)
+
+# YANG user types plugins ("user_ipv4" is just an example, not installed by default)
+set(USER_TYPE_LIST "user_date_and_time")
+if(ENABLE_STATIC)
+    set(USER_TYPE_LIST_SIZE " 0 ")
+    foreach(USER_TYPE ${USER_TYPE_LIST})
+        add_library(${USER_TYPE} STATIC "src/user_types/${USER_TYPE}.c")
+        target_link_libraries(yang ${USER_TYPE})
+        set(USER_TYPE_LIST_SIZE "${USER_TYPE_LIST_SIZE} + lytype_size(${USER_TYPE})")
+        set(EXTERN_USER_TYPE_LIST "${EXTERN_USER_TYPE_LIST}extern struct lytype_plugin_list ${USER_TYPE}[];\n")
+        set(MEMCPY_USER_TYPE_LIST "${MEMCPY_USER_TYPE_LIST}    lytype_add(plugin, count, ${USER_TYPE});\n")
+        set(STATIC_LOADED_PLUGINS "${STATIC_LOADED_PLUGINS} \"${USER_TYPE}\",")
+        MATH(EXPR ITEM "${ITEM}+1")
+    endforeach()
+    set(STATIC_LOADED_PLUGINS_COUNT "${ITEM}")
+else()
+    add_subdirectory(src/user_types)
+endif(ENABLE_STATIC)
+
+configure_file(${PROJECT_SOURCE_DIR}/src/plugin_config.h.in ${PROJECT_BINARY_DIR}/src/plugin_config.h)
 
 # yanglint
 add_executable(yanglint ${lintsrc})
@@ -312,7 +382,6 @@ if(ENABLE_VALGRIND_TESTS)
 endif()
 
 if(ENABLE_BUILD_TESTS)
-    find_package(CMocka 1.0.0)
     if(CMOCKA_FOUND)
         enable_testing()
         add_subdirectory(tests)
@@ -324,8 +393,4 @@ endif(ENABLE_BUILD_TESTS)
 
 if(GEN_LANGUAGE_BINDINGS AND GEN_CPP_BINDINGS)
     add_subdirectory(swig)
-endif()
-
-if(GEN_LANGUAGE_BINDINGS AND GEN_JAVASCRIPT_BINDINGS)
-    include(swig/javascript/CMakeLists.txt)
 endif()

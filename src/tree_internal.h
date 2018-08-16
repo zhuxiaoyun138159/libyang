@@ -16,6 +16,8 @@
 #ifndef LY_TREE_INTERNAL_H_
 #define LY_TREE_INTERNAL_H_
 
+#include <stdint.h>
+
 #include "libyang.h"
 #include "tree_schema.h"
 #include "tree_data.h"
@@ -63,6 +65,74 @@ struct lyd_node_pos {
 };
 
 /**
+ * @brief Internal structure for LYB parser/printer.
+ */
+struct lyb_state {
+    size_t *written;
+    size_t *position;
+    uint8_t *inner_chunks;
+    int used;
+    int size;
+    const struct lys_module **models;
+    int mod_count;
+
+    /* LYB printer only */
+    struct {
+        struct lys_node *first_sibling;
+        struct hash_table *ht;
+    } *sib_ht;
+    int sib_ht_count;
+};
+
+/* struct lyb_state allocation step */
+#define LYB_STATE_STEP 4
+
+/**
+ * LYB schema hash constants
+ *
+ * Hash is divided to collision ID and hash itself.
+ *
+ * First bits are collision ID until 1 is found. The rest is truncated 32b hash.
+ * 1xxx xxxx - collision ID 0 (no collisions)
+ * 01xx xxxx - collision ID 1 (collision ID 0 hash collided)
+ * 001x xxxx - collision ID 2 ...
+ */
+
+/* Number of bits the whole hash will take (including hash collision ID) */
+#define LYB_HASH_BITS 8
+
+/* Masking 32b hash (collision ID 0) */
+#define LYB_HASH_MASK 0x7f
+
+/* Type for storing the whole hash (used only internally, publicly defined directly) */
+#define LYB_HASH uint8_t
+
+/* Need to move this first >> collision number (from 0) to get collision ID hash part */
+#define LYB_HASH_COLLISION_ID 0x80
+
+/* How many bytes are reserved for one data chunk SIZE (8B is maximum) */
+#define LYB_SIZE_BYTES 1
+
+/* Maximum size that will be written into LYB_SIZE_BYTES (must be large enough) */
+#define LYB_SIZE_MAX UINT8_MAX
+
+/* How many bytes are reserved for one data chunk inner chunk count */
+#define LYB_INCHUNK_BYTES 1
+
+/* Maximum size that will be written into LYB_INCHUNK_BYTES (must be large enough) */
+#define LYB_INCHUNK_MAX UINT8_MAX
+
+/* Just a helper macro */
+#define LYB_META_BYTES (LYB_INCHUNK_BYTES + LYB_SIZE_BYTES)
+
+/* Type large enough for all meta data */
+#define LYB_META uint16_t
+
+LYB_HASH lyb_hash(struct lys_node *sibling, uint8_t collision_id);
+
+int lyb_has_schema_model(struct lys_node *sibling, const struct lys_module **models, int mod_count);
+
+/**
  * Macros to work with ::lyd_node#when_status
  * +--- bit 1 - some when-stmt connected with the node (resolve_applies_when() is true)
  * |+-- bit 2 - when-stmt's condition is resolved and it is true
@@ -80,7 +150,7 @@ struct lyd_node_pos {
 /**
  * @brief Type flag for an unresolved type in a grouping.
  */
-#define LYTYPE_GRP 0x80
+#define LY_VALUE_UNRESGRP 0x80
 
 #ifdef LY_ENABLED_CACHE
 
@@ -240,15 +310,6 @@ int lys_ext_iter(struct lys_ext_instance **ext, uint8_t ext_size, uint8_t start,
  */
 void lys_extension_instances_free(struct ly_ctx *ctx, struct lys_ext_instance **e, unsigned int size,
                                   void (*private_destructor)(const struct lys_node *node, void *priv));
-
-/**
- * @brief Switch two same schema nodes. \p src must be a shallow copy
- * of \p dst.
- *
- * @param[in] dst Destination node that will be replaced with \p src.
- * @param[in] src Source node that will replace \p dst.
- */
-void lys_node_switch(struct lys_node *dst, struct lys_node *src);
 
 /**
  * @brief Add pointer to \p leafref to \p leafref_target children so that it knows there
@@ -438,6 +499,8 @@ void lyd_free_value(lyd_val value, LY_DATA_TYPE value_type, uint8_t value_flags,
 
 int lyd_list_equal(struct lyd_node *node1, struct lyd_node *node2, int with_defaults);
 
+int lys_make_implemented_r(struct lys_module *module, struct unres_schema *unres);
+
 /**
  * @brief Check for (validate) mandatory nodes of a data tree. Checks recursively whole data tree. Requires all when
  * statement to be solved.
@@ -458,22 +521,23 @@ int lyd_check_mandatory_tree(struct lyd_node *root, struct ly_ctx *ctx, int opti
 int lys_ingrouping(const struct lys_node *node);
 
 /**
- * @brief Add default values, \p resolve unres, and finally
- * remove any redundant default values based on \p options.
+ * @brief Process (add/clean) default nodes in the data tree and resolve the unresolved items
  *
- * @param[in] root Data tree root. With empty data tree, new default nodes can be created so the root pointer
- *            will contain/return the newly created data tree.
- * @param[in] options Options for the inserting data to the target data tree options, see @ref parseroptions.
- * @param[in] ctx Optional parameter. If provided, default nodes from all modules in the context will be added.
- *            If NULL, only the modules explicitly mentioned in data tree are taken into account.
- * @param[in] data_tree Additional data tree to be traversed when evaluating when or must expressions in \p root
- *            tree.
- * @param[in] act_notif Action/notification itself in case \p root is actually an action/notification.
- * @param[in] unres Valid unres structure, on function successful exit they are all resolved.
- * @return 0 on success, nonzero on failure.
+ * @param[in,out] root  Pointer to the root node of the complete data tree, the root node can be NULL if the data tree
+ *                      is empty
+ * @param[in] options   Parser options to know the data tree type, see @ref parseroptions.
+ * @param[in] ctx       Context for the case the \p root is empty (in that case \p ctx must not be NULL)
+ * @param[in] data_tree Additional data tree for validating RPC/action/notification. The tree is used to satisfy
+ *                      possible references to the datastore content.
+ * @param[in] act_notif In case of nested action/notification, pointer to the subroot of the action/notification. Note
+ *                      that in this case the \p root points to the top level data tree node which provides the context
+ *                      for the nested action/notification
+ * @param[in] unres     Unresolved data list, the newly added default nodes may need to add some unresolved items
+ * @param[in] wd        Whether to add default values.
+ * @return EXIT_SUCCESS or EXIT_FAILURE
  */
 int lyd_defaults_add_unres(struct lyd_node **root, int options, struct ly_ctx *ctx, const struct lyd_node *data_tree,
-                           struct lyd_node *act_notif, struct unres_data *unres);
+                           struct lyd_node *act_notif, struct unres_data *unres, int wd);
 
 void lys_enable_deviations(struct lys_module *module);
 

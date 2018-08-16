@@ -75,7 +75,7 @@ xml_data_search_schemanode(struct lyxml_elem *xml, struct lys_node *start, int o
 
 /* logs directly */
 static int
-xml_get_value(struct lyd_node *node, struct lyxml_elem *xml, int editbits)
+xml_get_value(struct lyd_node *node, struct lyxml_elem *xml, int editbits, int trusted)
 {
     struct lyd_node_leaf_list *leaf = (struct lyd_node_leaf_list *)node;
 
@@ -92,7 +92,7 @@ xml_get_value(struct lyd_node *node, struct lyxml_elem *xml, int editbits)
 
     /* the value is here converted to a JSON format if needed in case of LY_TYPE_IDENT and LY_TYPE_INST or to a
      * canonical form of the value */
-    if (!lyp_parse_value(&((struct lys_node_leaf *)leaf->schema)->type, &leaf->value_str, xml, leaf, NULL, NULL, 1, 0)) {
+    if (!lyp_parse_value(&((struct lys_node_leaf *)leaf->schema)->type, &leaf->value_str, xml, leaf, NULL, NULL, 1, 0, trusted)) {
         return EXIT_FAILURE;
     }
 
@@ -143,7 +143,7 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
 
     /* find schema node */
     if (!parent) {
-        mod = ly_ctx_get_module_by_ns(ctx, xml->ns->value, NULL, 1);
+        mod = ly_ctx_get_module_by_ns(ctx, xml->ns->value, NULL, 0);
         if (ctx->data_clb) {
             if (!mod) {
                 mod = ctx->data_clb(ctx, NULL, xml->ns->value, 0, ctx->data_clb_data);
@@ -177,8 +177,7 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
                             }
                             /* 2) now, the data node will be top-level, there are only non-data schema nodes */
                             if (!target) {
-                                while ((schema = (struct lys_node *) lys_getnext(schema, (struct lys_node *) aug, NULL,
-                                                                                 0))) {
+                                while ((schema = (struct lys_node *) lys_getnext(schema, (struct lys_node *) aug, NULL, 0))) {
                                     /* 3) alright, even the name matches, we found our schema node */
                                     if (ly_strequal(schema->name, xml->name, 1)) {
                                         break;
@@ -335,7 +334,7 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
             str = attr->ns->value;
         }
 
-        r = lyp_fill_attr(ctx, *result, str, NULL, attr->name, attr->value, xml, &dattr);
+        r = lyp_fill_attr(ctx, *result, str, NULL, attr->name, attr->value, xml, options, &dattr);
         if (r == -1) {
             goto error;
         } else if (r == 1) {
@@ -454,7 +453,7 @@ attr_error:
     /* type specific processing */
     if (schema->nodetype & (LYS_LEAF | LYS_LEAFLIST)) {
         /* type detection and assigning the value */
-        if (xml_get_value(*result, xml, editbits)) {
+        if (xml_get_value(*result, xml, editbits, options & LYD_OPT_TRUSTED)) {
             goto error;
         }
     } else if (schema->nodetype & LYS_ANYDATA) {
@@ -749,7 +748,7 @@ lyd_parse_xml(struct ly_ctx *ctx, struct lyxml_elem **root, int options, ...)
     ly_set_free(set);
 
     /* add default values, resolve unres and check for mandatory nodes in final tree */
-    if (lyd_defaults_add_unres(&result, options, ctx, data_tree, act_notif, unres)) {
+    if (lyd_defaults_add_unres(&result, options, ctx, data_tree, act_notif, unres, 1)) {
         goto error;
     }
     if (!(options & (LYD_OPT_TRUSTED | LYD_OPT_NOTIF_FILTER))

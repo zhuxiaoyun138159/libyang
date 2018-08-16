@@ -23,7 +23,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-#include <limits.h>
 
 #include "common.h"
 #include "extensions.h"
@@ -42,16 +41,53 @@ static uint16_t type_plugins_count = 0;
 static struct ly_set dlhandlers = {0, 0, {NULL}};
 static pthread_mutex_t plugins_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static char **loaded_plugins = NULL; /* both ext and type plugin names */
+static uint16_t loaded_plugins_count = 0;
+
 /**
  * @brief reference counter for the plugins, it actually counts number of contexts
  */
 static uint32_t plugin_refs;
+
+API const char * const *
+ly_get_loaded_plugins(void)
+{
+    return (const char * const *)loaded_plugins;
+}
 
 API int
 ly_clean_plugins(void)
 {
     unsigned int u;
     int ret = EXIT_SUCCESS;
+
+#ifdef STATIC
+    /* lock the extension plugins list */
+    pthread_mutex_lock(&plugins_lock);
+
+    if(ext_plugins) {
+        free(ext_plugins);
+        ext_plugins = NULL;
+        ext_plugins_count = 0;
+    }
+
+    if(type_plugins) {
+        free(type_plugins);
+        type_plugins = NULL;
+        type_plugins_count = 0;
+    }
+
+    for (u = 0; u < loaded_plugins_count; ++u) {
+        free(loaded_plugins[u]);
+    }
+    free(loaded_plugins);
+    loaded_plugins = NULL;
+    loaded_plugins_count = 0;
+
+    /* unlock the global structures */
+    pthread_mutex_unlock(&plugins_lock);
+    return ret;
+#endif /* STATIC */
 
     /* lock the extension plugins list */
     pthread_mutex_lock(&plugins_lock);
@@ -76,6 +112,13 @@ ly_clean_plugins(void)
     type_plugins = NULL;
     type_plugins_count = 0;
 
+    for (u = 0; u < loaded_plugins_count; ++u) {
+        free(loaded_plugins[u]);
+    }
+    free(loaded_plugins);
+    loaded_plugins = NULL;
+    loaded_plugins_count = 0;
+
     /* close the dl handlers */
     for (u = 0; u < dlhandlers.number; u++) {
         dlclose(dlhandlers.set.g[u]);
@@ -98,6 +141,10 @@ lytype_load_plugin(void *dlhandler, const char *file_name)
     struct lytype_plugin_list *plugin, *p;
     uint32_t u, v;
     char *str;
+
+#ifdef STATIC
+    return 0;
+#endif /* STATIC */
 
     /* get the plugin data */
     plugin = dlsym(dlhandler, file_name);
@@ -144,6 +191,10 @@ lyext_load_plugin(void *dlhandler, const char *file_name)
     struct lyext_plugin_complex *pluginc;
     uint32_t u, v;
     char *str;
+
+#ifdef STATIC
+    return 0;
+#endif /* STATIC */
 
     /* get the plugin data */
     plugin = dlsym(dlhandler, file_name);
@@ -206,15 +257,30 @@ lyext_load_plugin(void *dlhandler, const char *file_name)
     return 0;
 }
 
+/* spends name */
+static void
+ly_add_loaded_plugin(char *name)
+{
+    loaded_plugins = ly_realloc(loaded_plugins, (loaded_plugins_count + 2) * sizeof *loaded_plugins);
+    LY_CHECK_ERR_RETURN(!loaded_plugins, free(name); LOGMEM(NULL), );
+    ++loaded_plugins_count;
+
+    loaded_plugins[loaded_plugins_count - 1] = name;
+    loaded_plugins[loaded_plugins_count] = NULL;
+}
+
 static void
 ly_load_plugins_dir(DIR *dir, const char *dir_path, int ext_or_type)
 {
     struct dirent *file;
     size_t len;
-    char *str;
-    char name[NAME_MAX];
+    char *str, *name;
     void *dlhandler;
     int ret;
+
+#ifdef STATIC
+    return;
+#endif /* STATIC */
 
     while ((file = readdir(dir))) {
         /* required format of the filename is *LY_PLUGIN_SUFFIX */
@@ -223,10 +289,6 @@ ly_load_plugins_dir(DIR *dir, const char *dir_path, int ext_or_type)
                 strcmp(&file->d_name[len - LY_PLUGIN_SUFFIX_LEN], LY_PLUGIN_SUFFIX)) {
             continue;
         }
-
-        /* store the name without the suffix */
-        memcpy(name, file->d_name, len - LY_PLUGIN_SUFFIX_LEN);
-        name[len - LY_PLUGIN_SUFFIX_LEN] = '\0';
 
         /* and construct the filepath */
         if (asprintf(&str, "%s/%s", dir_path, file->d_name) == -1) {
@@ -252,25 +314,35 @@ ly_load_plugins_dir(DIR *dir, const char *dir_path, int ext_or_type)
         }
         dlerror();    /* Clear any existing error */
 
+        /* store the name without the suffix */
+        name = strndup(file->d_name, len - LY_PLUGIN_SUFFIX_LEN);
+        if (!name) {
+            LOGMEM(NULL);
+            free(str);
+            return;
+        }
+
         if (ext_or_type) {
             ret = lyext_load_plugin(dlhandler, name);
         } else {
             ret = lytype_load_plugin(dlhandler, name);
         }
-        if (ret == 1) {
-            free(str);
+        if (!ret) {
+            LOGVRB("Plugin \"%s\" successfully loaded.", str);
+            /* spends name */
+            ly_add_loaded_plugin(name);
+            /* keep the handler */
+            ly_set_add(&dlhandlers, dlhandler, LY_SET_OPT_USEASLIST);
+        } else {
+            free(name);
             dlclose(dlhandler);
-            continue;
-        } else if (ret == -1) {
-            free(str);
-            dlclose(dlhandler);
-            break;
         }
-        LOGVRB("Plugin \"%s\" successfully loaded.", str);
         free(str);
 
-        /* keep the handler */
-        ly_set_add(&dlhandlers, dlhandler, LY_SET_OPT_USEASLIST);
+        if (ret == -1) {
+            /* finish on error */
+            break;
+        }
     }
 }
 
@@ -279,6 +351,23 @@ ly_load_plugins(void)
 {
     DIR* dir;
     const char *pluginsdir;
+
+#ifdef STATIC
+    /* lock the extension plugins list */
+    pthread_mutex_lock(&plugins_lock);
+
+    ext_plugins = static_load_lyext_plugins(&ext_plugins_count);
+    type_plugins = static_load_lytype_plugins(&type_plugins_count);
+
+    int u;
+    for (u = 0; u < static_loaded_plugins_count; u++) {
+        ly_add_loaded_plugin(strdup(static_loaded_plugins[u]));
+    }
+
+    /* unlock the global structures */
+    pthread_mutex_unlock(&plugins_lock);
+    return;
+#endif /* STATIC */
 
     /* lock the extension plugins list */
     pthread_mutex_lock(&plugins_lock);
@@ -353,8 +442,17 @@ lys_ext_instance_presence(struct lys_ext *def, struct lys_ext_instance **ext, ui
 
     /* search for the extension instance */
     for (index = 0; index < ext_size; index++) {
-        if (ext[index]->def == def) {
-            return index;
+        if (ext[index]->module->ctx == def->module->ctx) {
+            /* from the same context */
+            if (ext[index]->def == def) {
+                return index;
+            }
+        } else {
+            /* from different contexts */
+            if (ly_strequal0(ext[index]->def->name, def->name)
+                    && ly_strequal0(lys_main_module(ext[index]->def->module)->name, lys_main_module(def->module)->name)) {
+                return index;
+            }
         }
     }
 

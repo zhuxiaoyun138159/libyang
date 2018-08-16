@@ -15,7 +15,6 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -36,6 +35,7 @@
 #include "resolve.h"
 #include "tree_internal.h"
 #include "parser_yang.h"
+#include "xpath.h"
 
 #define LYP_URANGE_LEN 19
 
@@ -314,7 +314,7 @@ lyp_add_ietf_netconf_annotations(struct lys_module *mod)
     LY_CHECK_ERR_RETURN(!reallocated, LOGMEM(ctx), EXIT_FAILURE);
     mod->ext = reallocated;
     /* 1) edit-config's operation */
-    op = calloc(1, sizeof(struct lys_ext_instance_complex) + 5 * sizeof(void*) + sizeof(uint16_t));
+    op = calloc(1, (sizeof(struct lys_ext_instance_complex) - 1) + 5 * sizeof(void*) + sizeof(uint16_t));
     LY_CHECK_ERR_RETURN(!op, LOGMEM(ctx), EXIT_FAILURE);
     mod->ext[mod->ext_size] = (struct lys_ext_instance *)op;
     op->arg_value = lydict_insert(ctx, "operation", 9);
@@ -346,7 +346,7 @@ lyp_add_ietf_netconf_annotations(struct lys_module *mod)
     mod->ext_size++;
 
     /* 2) filter's type */
-    op = calloc(1, sizeof(struct lys_ext_instance_complex) + 5 * sizeof(void*) + sizeof(uint16_t));
+    op = calloc(1, (sizeof(struct lys_ext_instance_complex) - 1) + 5 * sizeof(void*) + sizeof(uint16_t));
     LY_CHECK_ERR_RETURN(!op, LOGMEM(ctx), EXIT_FAILURE);
     mod->ext[mod->ext_size] = (struct lys_ext_instance *)op;
     op->arg_value = lydict_insert(ctx, "type", 4);
@@ -386,7 +386,7 @@ lyp_add_ietf_netconf_annotations(struct lys_module *mod)
     mod->ext_size++;
 
     /* 3) filter's select */
-    op = calloc(1, sizeof(struct lys_ext_instance_complex) + 5 * sizeof(void*) + sizeof(uint16_t));
+    op = calloc(1, (sizeof(struct lys_ext_instance_complex) - 1) + 5 * sizeof(void*) + sizeof(uint16_t));
     LY_CHECK_ERR_RETURN(!op, LOGMEM(ctx), EXIT_FAILURE);
     mod->ext[mod->ext_size] = (struct lys_ext_instance *)op;
     op->arg_value = lydict_insert(ctx, "select", 6);
@@ -405,274 +405,6 @@ lyp_add_ietf_netconf_annotations(struct lys_module *mod)
     mod->ext_size++;
 
     return EXIT_SUCCESS;
-}
-
-/* if module is !NULL, then the function searches for submodule */
-struct lys_module *
-lyp_search_file(struct ly_ctx *ctx, struct lys_module *module, const char *name, const char *revision,
-                int implement, struct unres_schema *unres)
-{
-    size_t len, flen, match_len = 0, dir_len;
-    int fd, i, implicit_cwd = 0;
-    char *wd, *wn = NULL;
-    DIR *dir = NULL;
-    struct dirent *file;
-    char *match_name = NULL, *dot, *rev, *filename;
-    LYS_INFORMAT format, match_format = 0;
-    struct lys_module *result = NULL;
-    unsigned int u;
-    struct ly_set *dirs;
-    struct stat st;
-
-    /* start to fill the dir fifo with the context's search path (if set)
-     * and the current working directory */
-    dirs = ly_set_new();
-    if (!dirs) {
-        LOGMEM(ctx);
-        return NULL;
-    }
-
-    len = strlen(name);
-    wd = get_current_dir_name();
-    if (!wd) {
-        LOGMEM(ctx);
-        goto cleanup;
-    } else {
-        /* add implicit current working directory (./) to be searched,
-         * this directory is not searched recursively */
-        if (ly_set_add(dirs, wd, 0) == -1) {
-            goto cleanup;
-        }
-        implicit_cwd = 1;
-    }
-    if (ctx->models.search_paths) {
-        for (i = 0; ctx->models.search_paths[i]; i++) {
-            /* check for duplicities with the implicit current working directory */
-            if (implicit_cwd && !strcmp(dirs->set.g[0], ctx->models.search_paths[i])) {
-                implicit_cwd = 0;
-                continue;
-            }
-            wd = strdup(ctx->models.search_paths[i]);
-            if (!wd) {
-                LOGMEM(ctx);
-                goto cleanup;
-            } else if (ly_set_add(dirs, wd, 0) == -1) {
-                goto cleanup;
-            }
-        }
-    }
-    wd = NULL;
-
-    /* start searching */
-    while (dirs->number) {
-        free(wd);
-        free(wn); wn = NULL;
-
-        dirs->number--;
-        wd = (char *)dirs->set.g[dirs->number];
-        dirs->set.g[dirs->number] = NULL;
-        LOGVRB("Searching for \"%s\" in %s.", name, wd);
-
-        if (dir) {
-            closedir(dir);
-        }
-        dir = opendir(wd);
-        dir_len = strlen(wd);
-        if (!dir) {
-            LOGWRN(ctx, "Unable to open directory \"%s\" for searching (sub)modules (%s).", wd, strerror(errno));
-        } else {
-            while ((file = readdir(dir))) {
-                if (!strcmp(".", file->d_name) || !strcmp("..", file->d_name)) {
-                    /* skip . and .. */
-                    continue;
-                }
-                free(wn);
-                if (asprintf(&wn, "%s/%s", wd, file->d_name) == -1) {
-                    LOGMEM(ctx);
-                    goto cleanup;
-                }
-                if (stat(wn, &st) == -1) {
-                    LOGWRN(ctx, "Unable to get information about \"%s\" file in \"%s\" when searching for (sub)modules (%s)",
-                           file->d_name, wd, strerror(errno));
-                    continue;
-                }
-                if (S_ISDIR(st.st_mode) && (dirs->number || !implicit_cwd)) {
-                    /* we have another subdirectory in searchpath to explore,
-                     * subdirectories are not taken into account in current working dir (dirs->set.g[0]) */
-                    if (ly_set_add(dirs, wn, 0) == -1) {
-                        goto cleanup;
-                    }
-                    /* continue with the next item in current directory */
-                    wn = NULL;
-                    continue;
-                } else if (!S_ISREG(st.st_mode)) {
-                    /* not a regular file (note that we see the target of symlinks instead of symlinks */
-                    continue;
-                }
-
-                /* here we know that the item is a file which can contain a module */
-                if (strncmp(name, file->d_name, len) ||
-                        (file->d_name[len] != '.' && file->d_name[len] != '@')) {
-                    /* different filename than the module we search for */
-                    continue;
-                }
-
-                /* get type according to filename suffix */
-                flen = strlen(file->d_name);
-                if (!strcmp(&file->d_name[flen - 4], ".yin")) {
-                    format = LYS_IN_YIN;
-                } else if (!strcmp(&file->d_name[flen - 5], ".yang")) {
-                    format = LYS_IN_YANG;
-                } else {
-                    /* not supportde suffix/file format */
-                    continue;
-                }
-
-                if (revision) {
-                    /* we look for the specific revision, try to get it from the filename */
-                    if (file->d_name[len] == '@') {
-                        /* check revision from the filename */
-                        if (strncmp(revision, &file->d_name[len + 1], strlen(revision))) {
-                            /* another revision */
-                            continue;
-                        } else {
-                            /* exact revision */
-                            free(match_name);
-                            match_name = wn;
-                            wn = NULL;
-                            match_len = dir_len + 1 + len;
-                            match_format = format;
-                            goto matched;
-                        }
-                    } else {
-                        /* continue trying to find exact revision match, use this only if not found */
-                        free(match_name);
-                        match_name = wn;
-                        wn = NULL;
-                        match_len = dir_len + 1 +len;
-                        match_format = format;
-                        continue;
-                    }
-                } else {
-                    /* remember the revision and try to find the newest one */
-                    if (match_name) {
-                        if (file->d_name[len] != '@' || lyp_check_date(ctx, &file->d_name[len + 1])) {
-                            continue;
-                        } else if (match_name[match_len] == '@' &&
-                                (strncmp(&match_name[match_len + 1], &file->d_name[len + 1], LY_REV_SIZE - 1) >= 0)) {
-                            continue;
-                        }
-                        free(match_name);
-                    }
-
-                    match_name = wn;
-                    wn = NULL;
-                    match_len = dir_len + 1 + len;
-                    match_format = format;
-                    continue;
-                }
-            }
-        }
-    }
-
-    if (!match_name) {
-        if (!module && !revision) {
-            /* otherwise the module would be already taken from the context */
-            result = (struct lys_module *)ly_ctx_get_module(ctx, name, NULL, 0);
-        }
-        if (!result) {
-            LOGERR(ctx, LY_ESYS, "Data model \"%s\" not found.", name);
-        }
-        goto cleanup;
-    }
-
-matched:
-    LOGVRB("Loading schema from \"%s\" file.", match_name);
-
-    /* cut the format for now */
-    dot = strrchr(match_name, '.');
-    dot[1] = '\0';
-
-    /* check that the same file was not already loaded - it make sense only in case of loading the newest revision,
-     * search also in disabled module - if the matching module is disabled, it will be enabled instead of loading it */
-    if (!revision) {
-        for (i = 0; i < ctx->models.used; ++i) {
-            if (ctx->models.list[i]->filepath && !strcmp(name, ctx->models.list[i]->name)
-                    && !strncmp(match_name, ctx->models.list[i]->filepath, strlen(match_name))) {
-                result = ctx->models.list[i];
-                if (implement && !result->implemented) {
-                    /* make it implemented now */
-                    if (lys_set_implemented(result)) {
-                        result = NULL;
-                    }
-                } else if (result->disabled) {
-                    lys_set_enabled(result);
-                }
-
-                goto cleanup;
-            }
-        }
-    }
-
-    /* add the format back */
-    dot[1] = 'y';
-
-    /* open the file */
-    fd = open(match_name, O_RDONLY);
-    if (fd < 0) {
-        LOGERR(ctx, LY_ESYS, "Unable to open data model file \"%s\" (%s).",
-               match_name, strerror(errno));
-        goto cleanup;
-    }
-
-    if (module) {
-        result = (struct lys_module *)lys_sub_parse_fd(module, fd, match_format, unres);
-    } else {
-        result = (struct lys_module *)lys_parse_fd_(ctx, fd, match_format, revision, implement);
-    }
-    close(fd);
-
-    if (!result) {
-        goto cleanup;
-    }
-
-    /* check that name and revision match filename */
-    filename = strrchr(match_name, '/');
-    if (!filename) {
-        filename = match_name;
-    } else {
-        filename++;
-    }
-    rev = strchr(filename, '@');
-    /* name */
-    len = strlen(result->name);
-    if (strncmp(filename, result->name, len) ||
-            ((rev && rev != &filename[len]) || (!rev && dot != &filename[len]))) {
-        LOGWRN(ctx, "File name \"%s\" does not match module name \"%s\".", filename, result->name);
-    }
-    if (rev) {
-        len = dot - ++rev;
-        if (!result->rev_size || len != 10 || strncmp(result->rev[0].date, rev, len)) {
-            LOGWRN(ctx, "File name \"%s\" does not match module revision \"%s\".", filename,
-                   result->rev_size ? result->rev[0].date : "none");
-        }
-    }
-
-    /* success */
-
-cleanup:
-    free(wn);
-    free(wd);
-    if (dir) {
-        closedir(dir);
-    }
-    free(match_name);
-    for (u = 0; u < dirs->number; u++) {
-        free(dirs->set.g[u]);
-    }
-    ly_set_free(dirs);
-
-    return result;
 }
 
 /* logs directly
@@ -1088,7 +820,7 @@ error:
 int
 lyp_check_pattern(struct ly_ctx *ctx, const char *pattern, pcre **pcre_precomp)
 {
-    int idx, start, end, err_offset, dol_count;
+    int idx, idx2, start, end, err_offset, count;
     char *perl_regex, *ptr;
     const char *err_msg, *orig_ptr;
     pcre *precomp;
@@ -1100,9 +832,9 @@ lyp_check_pattern(struct ly_ctx *ctx, const char *pattern, pcre **pcre_precomp)
      */
 
     /* we need to replace all "$" with "\$", count them now */
-    for (dol_count = 0, ptr = strchr(pattern, '$'); ptr; ++dol_count, ptr = strchr(ptr + 1, '$'));
+    for (count = 0, ptr = strchr(pattern, '$'); ptr; ++count, ptr = strchr(ptr + 1, '$'));
 
-    perl_regex = malloc((strlen(pattern) + 4 + dol_count) * sizeof(char));
+    perl_regex = malloc((strlen(pattern) + 4 + count) * sizeof(char));
     LY_CHECK_ERR_RETURN(!perl_regex, LOGMEM(ctx), EXIT_FAILURE);
     perl_regex[0] = '\0';
 
@@ -1161,9 +893,23 @@ lyp_check_pattern(struct ly_ctx *ctx, const char *pattern, pcre **pcre_precomp)
             return EXIT_FAILURE;
         }
 
-        /* make the space in the string and replace the block */
-        memmove(perl_regex + start + LYP_URANGE_LEN, perl_regex + end, strlen(perl_regex + end) + 1);
-        memcpy(perl_regex + start, lyp_ublock2urange[idx][1], LYP_URANGE_LEN);
+        /* make the space in the string and replace the block (but we cannot include brackets if it was already enclosed in them) */
+        for (idx2 = 0, count = 0; idx2 < start; ++idx2) {
+            if ((perl_regex[idx2] == '[') && (!idx2 || (perl_regex[-1] != '\\'))) {
+                ++count;
+            }
+            if ((perl_regex[idx2] == ']') && (!idx2 || (perl_regex[-1] != '\\'))) {
+                --count;
+            }
+        }
+        if (count) {
+            /* skip brackets */
+            memmove(perl_regex + start + (LYP_URANGE_LEN - 2), perl_regex + end, strlen(perl_regex + end) + 1);
+            memcpy(perl_regex + start, lyp_ublock2urange[idx][1] + 1, LYP_URANGE_LEN - 2);
+        } else {
+            memmove(perl_regex + start + LYP_URANGE_LEN, perl_regex + end, strlen(perl_regex + end) + 1);
+            memcpy(perl_regex + start, lyp_ublock2urange[idx][1], LYP_URANGE_LEN);
+        }
     }
 
     /* must return 0, already checked during parsing */
@@ -1225,9 +971,11 @@ lyp_precompile_pattern(struct ly_ctx *ctx, const char *pattern, pcre** pcre_cmp,
 static int
 make_canonical(struct ly_ctx *ctx, int type, const char **value, void *data1, void *data2)
 {
-    char buf[512];
+    const uint16_t buf_len = 511;
+    char buf[buf_len + 1];
     struct lys_type_bit **bits = NULL;
-    const char *module_name;
+    struct lyxp_expr *exp;
+    const char *module_name, *cur_expr, *end;
     int i, j, count;
     int64_t num;
     uint64_t unum;
@@ -1260,6 +1008,71 @@ make_canonical(struct ly_ctx *ctx, int type, const char **value, void *data1, vo
         } else {
             strcpy(buf, *value);
         }
+        break;
+
+    case LY_TYPE_INST:
+        exp = lyxp_parse_expr(ctx, *value);
+        LY_CHECK_ERR_RETURN(!exp, LOGINT(ctx), 0);
+
+        module_name = NULL;
+        count = 0;
+        for (i = 0; (unsigned)i < exp->used; ++i) {
+            cur_expr = &exp->expr[exp->expr_pos[i]];
+
+            /* copy WS */
+            if (i && ((end = exp->expr + exp->expr_pos[i - 1] + exp->tok_len[i - 1]) != cur_expr)) {
+                if (count + (cur_expr - end) > buf_len) {
+                    LOGINT(ctx);
+                    lyxp_expr_free(exp);
+                    return 0;
+                }
+                strncpy(&buf[count], end, cur_expr - end);
+                count += cur_expr - end;
+            }
+
+            if ((exp->tokens[i] == LYXP_TOKEN_NAMETEST) && (end = strnchr(cur_expr, ':', exp->tok_len[i]))) {
+                /* get the module name with ":" */
+                ++end;
+                j = end - cur_expr;
+
+                if (!module_name || strncmp(cur_expr, module_name, j)) {
+                    /* print module name with colon, it does not equal to the parent one */
+                    if (count + j > buf_len) {
+                        LOGINT(ctx);
+                        lyxp_expr_free(exp);
+                        return 0;
+                    }
+                    strncpy(&buf[count], cur_expr, j);
+                    count += j;
+                }
+                module_name = cur_expr;
+
+                /* copy the rest */
+                if (count + (exp->tok_len[i] - j) > buf_len) {
+                    LOGINT(ctx);
+                    lyxp_expr_free(exp);
+                    return 0;
+                }
+                strncpy(&buf[count], end, exp->tok_len[i] - j);
+                count += exp->tok_len[i] - j;
+            } else {
+                if (count + exp->tok_len[i] > buf_len) {
+                    LOGINT(ctx);
+                    lyxp_expr_free(exp);
+                    return 0;
+                }
+                strncpy(&buf[count], &exp->expr[exp->expr_pos[i]], exp->tok_len[i]);
+                count += exp->tok_len[i];
+            }
+        }
+        if (count > buf_len) {
+            LOGINT(ctx);
+            lyxp_expr_free(exp);
+            return 0;
+        }
+        buf[count] = '\0';
+
+        lyxp_expr_free(exp);
         break;
 
     case LY_TYPE_DEC64:
@@ -1370,11 +1183,12 @@ ident_val_add_module_prefix(const char *value, const struct lyxml_elem *xml, str
  * local_mod - optional if the local module dos not match the module of leaf/attr
  * store - flag for union resolution - we do not want to store the result, we are just learning the type
  * dflt - whether the value is a default value from the schema
+ * trusted - whether the value is trusted to be valid (but may not be canonical, so it is canonized)
  */
 struct lys_type *
 lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *xml,
                 struct lyd_node_leaf_list *leaf, struct lyd_attr *attr, struct lys_module *local_mod,
-                int store, int dflt)
+                int store, int dflt, int trusted)
 {
     struct lys_type *ret = NULL, *t;
     struct lys_tpdf *tpdf;
@@ -1419,7 +1233,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
     /* fully clear the value */
     if (store) {
         lyd_free_value(*val, *val_type, *val_flags, type);
-        *val_flags &= ~LYTYPE_UNRES;
+        *val_flags &= ~LY_VALUE_UNRES;
     }
 
     switch (type->base) {
@@ -1474,7 +1288,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         /* length of the encoded string */
         len = ((unum / 4) * 3) - found;
-        if (validate_length_range(0, len, 0, 0, 0, type, value, contextnode)) {
+        if (!trusted && validate_length_range(0, len, 0, 0, 0, type, value, contextnode)) {
             goto cleanup;
         }
 
@@ -1536,7 +1350,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             for (found = i = 0; i < type->info.bits.count; i++) {
                 if (!strncmp(type->info.bits.bit[i].name, &value[c], len) && !type->info.bits.bit[i].name[len]) {
                     /* we have match, check if the value is enabled ... */
-                    for (j = 0; j < type->info.bits.bit[i].iffeature_size; j++) {
+                    for (j = 0; !trusted && (j < type->info.bits.bit[i].iffeature_size); j++) {
                         if (!resolve_iffeature(&type->info.bits.bit[i].iffeature[j])) {
                             if (leaf) {
                                 LOGVAL(ctx, LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
@@ -1638,7 +1452,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             goto cleanup;
         }
 
-        if (validate_length_range(2, 0, 0, num, type->info.dec64.dig, type, value, contextnode)) {
+        if (!trusted && validate_length_range(2, 0, 0, num, type->info.dec64.dig, type, value, contextnode)) {
             goto cleanup;
         }
 
@@ -1676,7 +1490,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
         for (i = found = 0; i < type->info.enums.count; i++) {
             if (value && !strcmp(value, type->info.enums.enm[i].name)) {
                 /* we have match, check if the value is enabled ... */
-                for (j = 0; j < type->info.enums.enm[i].iffeature_size; j++) {
+                for (j = 0; !trusted && (j < type->info.enums.enm[i].iffeature_size); j++) {
                     if (!resolve_iffeature(&type->info.enums.enm[i].iffeature[j])) {
                         if (leaf) {
                             LOGVAL(ctx, LYE_INVAL, LY_VLOG_LYD, contextnode, value, itemname);
@@ -1822,13 +1636,18 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             }
             /* turn logging back on */
             ly_ilo_restore(NULL, prev_ilo, NULL, 0);
+        } else {
+            if (make_canonical(ctx, LY_TYPE_INST, &value, NULL, NULL)) {
+                /* if a change occured, value was removed from the dicionary so fix the pointers */
+                *value_ = value;
+            }
         }
 
         if (store) {
             /* note that the data node is an unresolved instance-identifier */
             val->instance = NULL;
             *val_type = LY_TYPE_INST;
-            *val_flags |= LYTYPE_UNRES;
+            *val_flags |= LY_VALUE_UNRES;
         }
 
         if (!ly_strequal(value, *value_, 1)) {
@@ -1855,7 +1674,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         /* it is called not only to get the final type, but mainly to update value to canonical or JSON form
          * if needed */
-        t = lyp_parse_value(&type->info.lref.target->type, value_, xml, leaf, attr, NULL, store, dflt);
+        t = lyp_parse_value(&type->info.lref.target->type, value_, xml, leaf, attr, NULL, store, dflt, trusted);
         value = *value_; /* refresh possibly changed value */
         if (!t) {
             if (leaf) {
@@ -1868,18 +1687,18 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         if (store) {
             /* make the note that the data node is an unresolved leafref (value union was already filled) */
-            *val_flags |= LYTYPE_UNRES;
+            *val_flags |= LY_VALUE_UNRES;
         }
 
         type = t;
         break;
 
     case LY_TYPE_STRING:
-        if (validate_length_range(0, (value ? strlen(value) : 0), 0, 0, 0, type, value, contextnode)) {
+        if (!trusted && validate_length_range(0, (value ? strlen(value) : 0), 0, 0, 0, type, value, contextnode)) {
             goto cleanup;
         }
 
-        if (validate_pattern(ctx, value, type, contextnode)) {
+        if (!trusted && validate_pattern(ctx, value, type, contextnode)) {
             goto cleanup;
         }
 
@@ -1916,7 +1735,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_INT8:
         if (parse_int(value, __INT64_C(-128), __INT64_C(127), dflt ? 0 : 10, &num, contextnode)
-                || validate_length_range(1, 0, num, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(1, 0, num, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -1931,7 +1750,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_INT16:
         if (parse_int(value, __INT64_C(-32768), __INT64_C(32767), dflt ? 0 : 10, &num, contextnode)
-                || validate_length_range(1, 0, num, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(1, 0, num, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -1946,7 +1765,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_INT32:
         if (parse_int(value, __INT64_C(-2147483648), __INT64_C(2147483647), dflt ? 0 : 10, &num, contextnode)
-                || validate_length_range(1, 0, num, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(1, 0, num, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -1962,7 +1781,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
     case LY_TYPE_INT64:
         if (parse_int(value, __INT64_C(-9223372036854775807) - __INT64_C(1), __INT64_C(9223372036854775807),
                       dflt ? 0 : 10, &num, contextnode)
-                || validate_length_range(1, 0, num, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(1, 0, num, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -1977,7 +1796,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_UINT8:
         if (parse_uint(value, __UINT64_C(255), dflt ? 0 : 10, &unum, contextnode)
-                || validate_length_range(0, unum, 0, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(0, unum, 0, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -1992,7 +1811,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_UINT16:
         if (parse_uint(value, __UINT64_C(65535), dflt ? 0 : 10, &unum, contextnode)
-                || validate_length_range(0, unum, 0, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(0, unum, 0, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -2007,7 +1826,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_UINT32:
         if (parse_uint(value, __UINT64_C(4294967295), dflt ? 0 : 10, &unum, contextnode)
-                || validate_length_range(0, unum, 0, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(0, unum, 0, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -2022,7 +1841,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
     case LY_TYPE_UINT64:
         if (parse_uint(value, __UINT64_C(18446744073709551615), dflt ? 0 : 10, &unum, contextnode)
-                || validate_length_range(0, unum, 0, 0, 0, type, value, contextnode)) {
+                || (!trusted && validate_length_range(0, unum, 0, 0, 0, type, value, contextnode))) {
             goto cleanup;
         }
 
@@ -2066,7 +1885,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
 
         while ((t = lyp_get_next_union_type(type, t, &found))) {
             found = 0;
-            ret = lyp_parse_value(t, value_, xml, leaf, attr, NULL, store, dflt);
+            ret = lyp_parse_value(t, value_, xml, leaf, attr, NULL, store, dflt, 0);
             if (ret) {
                 /* we have the result */
                 type = ret;
@@ -2108,7 +1927,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
         if (c == -1) {
             return NULL;
         } else if (!c) {
-            *val_flags |= LYTYPE_USER;
+            *val_flags |= LY_VALUE_USER;
         }
     }
 
@@ -2155,7 +1974,7 @@ lyp_get_next_union_type(struct lys_type *type, struct lys_type *prev_type, int *
 /* ret 0 - ret set, ret 1 - ret not set, no log, ret -1 - ret not set, fatal error */
 int
 lyp_fill_attr(struct ly_ctx *ctx, struct lyd_node *parent, const char *module_ns, const char *module_name,
-              const char *attr_name, const char *attr_value, struct lyxml_elem *xml, struct lyd_attr **ret)
+              const char *attr_name, const char *attr_value, struct lyxml_elem *xml, int options, struct lyd_attr **ret)
 {
     const struct lys_module *mod = NULL;
     const struct lys_submodule *submod = NULL;
@@ -2165,9 +1984,9 @@ lyp_fill_attr(struct ly_ctx *ctx, struct lyd_node *parent, const char *module_ns
 
     /* first, get module where the annotation should be defined */
     if (module_ns) {
-        mod = (struct lys_module *)ly_ctx_get_module_by_ns(ctx, module_ns, NULL, 1);
+        mod = (struct lys_module *)ly_ctx_get_module_by_ns(ctx, module_ns, NULL, 0);
     } else if (module_name) {
-        mod = (struct lys_module *)ly_ctx_get_module(ctx, module_name, NULL, 1);
+        mod = (struct lys_module *)ly_ctx_get_module(ctx, module_name, NULL, 0);
     } else {
         LOGINT(ctx);
         return -1;
@@ -2224,7 +2043,7 @@ lyp_fill_attr(struct ly_ctx *ctx, struct lyd_node *parent, const char *module_ns
     /* the value is here converted to a JSON format if needed in case of LY_TYPE_IDENT and LY_TYPE_INST or to a
      * canonical form of the value */
     type = lys_ext_complex_get_substmt(LY_STMT_TYPE, dattr->annotation, NULL);
-    if (!type || !lyp_parse_value(*type, &dattr->value_str, xml, NULL, dattr, NULL, 1, 0)) {
+    if (!type || !lyp_parse_value(*type, &dattr->value_str, xml, NULL, dattr, NULL, 1, 0, options & LYD_OPT_TRUSTED)) {
         lydict_remove(ctx, dattr->name);
         lydict_remove(ctx, dattr->value_str);
         free(dattr);

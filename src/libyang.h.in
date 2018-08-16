@@ -3,7 +3,7 @@
  * @author Radek Krejci <rkrejci@cesnet.cz>
  * @brief The main libyang public header.
  *
- * Copyright (c) 2015-2017 CESNET, z.s.p.o.
+ * Copyright (c) 2015 - 2018 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -17,9 +17,20 @@
 
 #include <stdio.h>
 
-@ENABLE_CACHE_MACRO@
+/**
+ * @brief Whether to enable schema and data cache.
+ */
+#cmakedefine LY_ENABLED_CACHE
 
-@ENABLE_LATEST_REVISIONS_MACRO@
+/**
+ * @brief Whether to allow reusing latest revisions of schemas.
+ */
+#cmakedefine LY_ENABLED_LATEST_REVISIONS
+
+/**
+ * @brief Whether to add priv pointer to struct lyd_node.
+ */
+#cmakedefine LY_ENABLED_LYD_PRIV
 
 /**
  * @brief Compiler flag for packed data types.
@@ -176,6 +187,8 @@ extern "C" {
  * - ly_ctx_get_module_data_clb()
  * - ly_ctx_set_allimplemented()
  * - ly_ctx_unset_allimplemented()
+ * - ly_ctx_set_disable_searchdirs()
+ * - ly_ctx_unset_disable_searchdirs()
  * - ly_ctx_load_module()
  * - ly_ctx_info()
  * - ly_ctx_get_module_set_id()
@@ -194,6 +207,7 @@ extern "C" {
  * - lys_set_implemented()
  * - lys_set_disabled()
  * - lys_set_enabled()
+ * - lys_search_localfile()
  */
 
 /**
@@ -299,6 +313,7 @@ extern "C" {
  * - lys_parse_mem()
  * - lys_parse_fd()
  * - lys_parse_path()
+ * - lys_search_localfile()
  * - ly_ctx_set_module_imp_clb()
  * - ly_ctx_load_module()
  */
@@ -768,9 +783,10 @@ extern "C" {
  * data. So how can then these conditions be verified during validation?
  *
  * There is an option to pass this additional data tree to all the functions that perform \b must and \b when condition
- * checking (\b lyd_parse_*() and lyd_validate()). Also, there are 2 flags of \b struct lys_node that
- * mark schema nodes that include paths that require foreign nodes (outside their subtree) for their evaluation. #LYS_XPATH_DEP
- * marks nodes with such must and/or when expressions, #LYS_LEAFREF_DEP with such a leafref.
+ * checking (\b lyd_parse_*() and lyd_validate()). Also, there are 3 flags of \b struct lys_node that
+ * mark schema nodes that include paths that require foreign nodes (outside their subtree) for their evaluation.
+ * #LYS_XPCONF_DEP marks nodes with such must and/or when expressions that require some configuration data,
+ * #LYS_XPSTATE_DEP that require some state data, and #LYS_LEAFREF_DEP with such a leafref.
  * The subtree root is always the particular operation data node (for RPC it is the RPC data node and all
  * the input or output nodes as its children and similarly for action and notification). Note that for action and
  * not-top-level notification this means that all their parents are not considered as belonging to their subtree even though
@@ -786,7 +802,8 @@ extern "C" {
  *
  * Firstly, you should somehow learn that the operation data tree you are currently working with includes some schema
  * node instances that have conditions that require foreign data. You can either know this about every operation beforehand
- * or you go through all the schema nodes looking for the flags #LYS_XPATH_DEP and #LYS_LEAFREF_DEP. Then you should use lys_node_xpath_atomize()
+ * or you go through all the schema nodes looking for the flags #LYS_XPCONF_DEP, #LYS_XPSTATE_DEP, and #LYS_LEAFREF_DEP.
+ * Then you should use lys_node_xpath_atomize()
  * to retrieve all XPath condition dependencies (in the form of schema nodes) outside the operation subtree. You will likely
  * want to use the flag #LYXP_NO_LOCAL to get rid of all the nodes from inside the subtree (you should already have those).
  * The last thing to do is to build a data tree that includes at least all the instances of the nodes obtained from lys_node_xpath_atomize()
@@ -1106,7 +1123,10 @@ struct ly_ctx;
                                         of this schema can be loaded with this option, note that the only
                                         revisions implemented by ly_ctx_info() are 2016-04-09 and 2018-01-17.
                                         This option cannot be used with ly_ctx_new_yl*() functions. */
-
+#define LY_CTX_DISABLE_SEARCHIDRS 0x08  /**< Do not search for schemas in context's searchidrs neither in current
+                                        working directory. It is entirely skipped and the only way to get
+                                        schema data for imports or for ly_ctx_load_module() is to use the
+                                        callbacks provided by caller via ly_ctx_set_module_imp_clb() */
 /**@} contextoptions */
 
 /**
@@ -1223,6 +1243,25 @@ void ly_ctx_unset_searchdirs(struct ly_ctx *ctx, int index);
  * @return NULL-terminated list (array) of the search paths, NULL if no searchpath was set.
  */
 const char * const *ly_ctx_get_searchdirs(const struct ly_ctx *ctx);
+
+/**
+ * @brief Make context to stop searching for schemas (imported, included or requested via ly_ctx_load_module())
+ * in searchdirs set via ly_ctx_set_searchdir() functions. Searchidrs are still stored in the context, so by
+ * unsetting the option by ly_ctx_unset_disable_searchdirs() searching in all previously searchdirs is restored.
+ *
+ * The same effect is achieved by using #LY_CTX_DISABLE_SEARCHIDRS option when creating new context or parsing
+ * a specific schema.
+ *
+ * @param[in] ctx Context to be modified.
+ */
+void ly_ctx_set_disable_searchdirs(struct ly_ctx *ctx);
+
+/**
+ * @brief Reverse function to ly_ctx_set_disable_searchdirs().
+ *
+ * @param[in] ctx Context to be modified.
+ */
+void ly_ctx_unset_disable_searchdirs(struct ly_ctx *ctx);
 
 /**
  * @brief Make context to set all the imported modules to be implemented. By default,
@@ -1425,6 +1464,12 @@ void ly_ctx_set_module_data_clb(struct ly_ctx *ctx, ly_module_data_clb clb, void
  * @return Callback or NULL if not set.
  */
 ly_module_data_clb ly_ctx_get_module_data_clb(const struct ly_ctx *ctx, void **user_data);
+
+#ifdef LY_ENABLED_LYD_PRIV
+
+void ly_ctx_set_priv_dup_clb(struct ly_ctx *ctx, void *(*priv_dup_clb)(const void *priv));
+
+#endif
 
 /**
  * @brief Get pointer to the schema tree of the module of the specified namespace

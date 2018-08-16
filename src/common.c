@@ -267,6 +267,7 @@ _transform_json2xml_subexp(const struct lys_module *module, const char *expr, ch
     uint32_t i, j;
     struct lyxp_expr *exp;
     struct ly_ctx *ctx = module->ctx;
+    enum int_log_opts prev_ilo;
 
     assert(module && expr && ((!prefixes && !namespaces && !ns_count) || (prefixes && namespaces && ns_count)));
 
@@ -373,10 +374,12 @@ _transform_json2xml_subexp(const struct lys_module *module, const char *expr, ch
             literal = lydict_insert(module->ctx, cur_expr + 1, exp->tok_len[i] - 2);
 
             /* parse literals as subexpressions if possible, otherwise treat as a literal */
+            ly_ilo_change(NULL, ILO_IGNORE, &prev_ilo, NULL);
             if (_transform_json2xml_subexp(module, literal, out, out_used, out_size, schema, inst_id, prefixes, namespaces, ns_count)) {
                 strncpy(&(*out)[*out_used], literal, exp->tok_len[i] - 2);
                 *out_used += exp->tok_len[i] - 2;
             }
+            ly_ilo_restore(NULL, prev_ilo, NULL, 0);
 
             lydict_remove(module->ctx, literal);
 
@@ -734,8 +737,9 @@ transform_iffeat_schema2json(const struct lys_module *module, const char *expr)
             assert(out_size == out_used);
             return lydict_insert_zc(ctx, out);
         }
-        id = strpbrk_backwards(col - 1, "/ [\'\"", (col - in) - 1);
-        if ((id[0] == '/') || (id[0] == ' ') || (id[0] == '[') || (id[0] == '\'') || (id[0] == '\"')) {
+        id = strpbrk_backwards(col - 1, " \f\n\r\t\v(", (col - in) - 1);
+        if ((id[0] == ' ') || (id[0] == '\f') || (id[0] == '\n') || (id[0] == '\r') ||
+            (id[0] == '\t') || (id[0] == '\v') || (id[0] == '(')) {
             ++id;
         }
         id_len = col - id;
@@ -749,7 +753,7 @@ transform_iffeat_schema2json(const struct lys_module *module, const char *expr)
         /* get the module */
         mod = lyp_get_module(module, id, id_len, NULL, 0, 0);
         if (!mod) {
-            LOGVAL(ctx, LYE_INMOD_LEN, LY_VLOG_NONE, NULL, id_len, id);
+            LOGVAL(ctx, LYE_SPEC, LY_VLOG_NONE, NULL, "Module prefix \"%.*s\" is unknown.", id_len, id);
             free(out);
             return NULL;
         }
@@ -842,7 +846,7 @@ transform_json2xpath_subexpr(const struct lys_module *cur_module, const struct l
             }
 
             /* do we print the module name? (always for "*" if there was any, it's an exception) */
-            if ((prev_mod != cur_module) || (name_len && (end[0] == '*'))) {
+            if (((prev_mod != cur_module) && (end[0] != '*')) || (name_len && (end[0] == '*'))) {
                 /* adjust out size (it can even decrease in some strange cases) */
                 *out_size += (strlen(prev_mod->name) - name_len) + 1;
                 *out = ly_realloc(*out, *out_size);
@@ -1364,4 +1368,61 @@ dec64cmp(int64_t num1, uint8_t dig1, int64_t num2, uint8_t dig2)
         return 0;
     }
     return (num1 > num2 ? 1 : -1);
+}
+
+LYB_HASH
+lyb_hash(struct lys_node *sibling, uint8_t collision_id)
+{
+    struct lys_module *mod;
+    uint32_t full_hash;
+    LYB_HASH hash;
+
+#ifdef LY_ENABLED_CACHE
+    if ((collision_id < LYS_NODE_HASH_COUNT) && sibling->hash[collision_id]) {
+        return sibling->hash[collision_id];
+    }
+#endif
+
+    mod = lys_node_module(sibling);
+
+    full_hash = dict_hash_multi(0, mod->name, strlen(mod->name));
+    full_hash = dict_hash_multi(full_hash, sibling->name, strlen(sibling->name));
+    if (collision_id) {
+        if (collision_id > strlen(mod->name)) {
+            /* wow */
+            LOGINT(sibling->module->ctx);
+            return 0;
+        }
+        full_hash = dict_hash_multi(full_hash, mod->name, collision_id);
+    }
+    full_hash = dict_hash_multi(full_hash, NULL, 0);
+
+    /* use the shortened hash */
+    hash = full_hash & (LYB_HASH_MASK >> collision_id);
+    /* add colision identificator */
+    hash |= LYB_HASH_COLLISION_ID >> collision_id;
+
+    /* save this hash */
+#ifdef LY_ENABLED_CACHE
+    if (collision_id < LYS_NODE_HASH_COUNT) {
+        sibling->hash[collision_id] = hash;
+    }
+#endif
+
+    return hash;
+}
+
+int
+lyb_has_schema_model(struct lys_node *sibling, const struct lys_module **models, int mod_count)
+{
+    int i;
+    const struct lys_module *mod = lys_node_module(sibling);
+
+    for (i = 0; i < mod_count; ++i) {
+        if (mod == models[i]) {
+            return 1;
+        }
+    }
+
+    return 0;
 }

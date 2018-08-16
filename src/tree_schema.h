@@ -3,7 +3,7 @@
  * @author Radek Krejci <rkrejci@cesnet.cz>
  * @brief libyang representation of data model trees.
  *
- * Copyright (c) 2015 CESNET, z.s.p.o.
+ * Copyright (c) 2015 - 2018 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -257,6 +257,7 @@ typedef enum {
     LYS_OUT_YIN = 2,     /**< YIN schema output format */
     LYS_OUT_TREE,        /**< Tree schema output format, for more information see the [printers](@ref howtoschemasprinters) page */
     LYS_OUT_INFO,        /**< Info schema output format, for more information see the [printers](@ref howtoschemasprinters) page */
+    LYS_OUT_JSON,        /**< JSON schema output format, reflecting YIN format with conversion of attributes to object's members */
 } LYS_OUTFORMAT;
 
 /**
@@ -265,10 +266,10 @@ typedef enum {
  *
  * @{
  */
-#define LYS_OUTOPT_TREE_RFC        0x01 /**< Conform to the RFC TODO tree output */
-#define LYS_OUTOPT_TREE_GROUPING   0x02 /**< Print groupings separately */
-#define LYS_OUTOPT_TREE_USES       0x04 /**< Print only uses instead the resolved grouping nodes */
-#define LYS_OUTOPT_TREE_NO_LEAFREF 0x08 /**< Do not print the target of leafrefs */
+#define LYS_OUTOPT_TREE_RFC        0x01 /**< Conform to the RFC TODO tree output (only for tree format) */
+#define LYS_OUTOPT_TREE_GROUPING   0x02 /**< Print groupings separately (only for tree format) */
+#define LYS_OUTOPT_TREE_USES       0x04 /**< Print only uses instead the resolved grouping nodes (only for tree format) */
+#define LYS_OUTOPT_TREE_NO_LEAFREF 0x08 /**< Do not print the target of leafrefs (only for tree format) */
 
 /**
  * @}
@@ -575,7 +576,7 @@ struct lys_ext_instance_complex {
 
     /* to this point the structure is compatible with the generic ::lys_ext_instance structure */
     struct lyext_substmt *substmt;   /**< pointer to the plugin's list of substatements' information */
-    char content[];                  /**< content of the extension instance */
+    char content[1];                 /**< content of the extension instance */
 };
 
 /**
@@ -647,6 +648,13 @@ int lys_ext_instance_presence(struct lys_ext *def, struct lys_ext_instance **ext
  * error (e.g. invalid input data).
  */
 void *lys_ext_complex_get_substmt(LY_STMT stmt, struct lys_ext_instance_complex *ext, struct lyext_substmt **info);
+
+/**
+ * @brief Get list of all the loaded plugins, both extension and user type ones.
+ *
+ * @return Const list of all the plugin names finished with NULL.
+ */
+const char * const *ly_get_loaded_plugins(void);
 
 /**
  * @brief Load the available YANG extension and type plugins from the plugin directory (LIBDIR/libyang/).
@@ -807,7 +815,6 @@ struct lys_submodule {
  * @brief YANG built-in types
  */
 typedef enum {
-    LY_TYPE_UNKNOWN = -1, /**< Unknown type (used in edit-config leaves) */
     LY_TYPE_DER = 0,      /**< Derived type */
     LY_TYPE_BINARY,       /**< Any binary data ([RFC 6020 sec 9.8](http://tools.ietf.org/html/rfc6020#section-9.8)) */
     LY_TYPE_BITS,         /**< A set of bits or flags ([RFC 6020 sec 9.7](http://tools.ietf.org/html/rfc6020#section-9.7)) */
@@ -828,15 +835,9 @@ typedef enum {
     LY_TYPE_UINT32,       /**< 32-bit unsigned integer ([RFC 6020 sec 9.2](http://tools.ietf.org/html/rfc6020#section-9.2)) */
     LY_TYPE_INT64,        /**< 64-bit signed integer ([RFC 6020 sec 9.2](http://tools.ietf.org/html/rfc6020#section-9.2)) */
     LY_TYPE_UINT64,       /**< 64-bit unsigned integer ([RFC 6020 sec 9.2](http://tools.ietf.org/html/rfc6020#section-9.2)) */
+    LY_TYPE_UNKNOWN,      /**< Unknown type (used in edit-config leaves) */
 } LY_DATA_TYPE;
 #define LY_DATA_TYPE_COUNT 20 /**< Number of different types */
-
-/* type flags */
-#define LYTYPE_UNRES 0x01   /**< flag for unresolved leafref or instance-identifier,
-                                 leafref - value union is filled as if being the target node's type,
-                                 instance-identifier - value union should not be accessed */
-#define LYTYPE_USER 0x02    /**< flag for a user type stored value */
-/* 0x80 is reserved for internal use */
 
 /**
  *
@@ -1004,7 +1005,7 @@ union lys_type_info {
  */
 struct lys_type {
     LY_DATA_TYPE _PACKED base;       /**< base type */
-    uint8_t flags;                   /**< type flags */
+    uint8_t value_flags;             /**< value type flags */
     uint8_t ext_size;                /**< number of elements in #ext array */
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     struct lys_tpdf *der;            /**< pointer to the superior typedef. If NULL,
@@ -1210,6 +1211,15 @@ struct lys_iffeature {
  * @}
  */
 
+#ifdef LY_ENABLED_CACHE
+
+/**
+ * @brief Maximum number of hashes stored in a schema node if cache is enabled.
+ */
+#define LYS_NODE_HASH_COUNT 4
+
+#endif
+
 /**
  * @brief Common structure representing single YANG data statement describing.
  *
@@ -1218,7 +1228,8 @@ struct lys_iffeature {
  * the node in some way or get more appropriate information, you are supposed to cast it to the appropriate
  * lys_node_* structure according to the #nodetype value.
  *
- * To traverse through all the child elements, use #LY_TREE_FOR or #LY_TREE_FOR_SAFE macro.
+ * To traverse through all the child elements, use #LY_TREE_FOR or #LY_TREE_FOR_SAFE macro. To traverse
+ * the whole subtree, use #LY_TREE_DFS_BEGIN macro.
  *
  * To cover all possible schema nodes, the ::lys_node type is used in ::lyd_node#schema for referencing schema
  * definition for a specific data node instance.
@@ -1246,7 +1257,10 @@ struct lys_node {
 
     LYS_NODE nodetype;               /**< type of the node (mandatory) */
     struct lys_node *parent;         /**< pointer to the parent node, NULL in case of a top level node */
-    struct lys_node *child;          /**< pointer to the first child node */
+    struct lys_node *child;          /**< pointer to the first child node \note Since other lys_node_*
+                                          structures represent end nodes, this member
+                                          is replaced in those structures. Therefore, be careful with accessing
+                                          this member without having information about the ::lys_node#nodetype. */
     struct lys_node *next;           /**< pointer to the next sibling node (NULL if there is no one) */
     struct lys_node *prev;           /**< pointer to the previous sibling node \note Note that this pointer is
                                           never NULL. If there is no sibling node, pointer points to the node
@@ -1254,13 +1268,17 @@ struct lys_node {
                                           node in the list. */
 
     void *priv;                      /**< private caller's data, not used by libyang */
+
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
 };
 
 /**
  * @brief Schema container node structure.
  *
  * Beginning of the structure is completely compatible with ::lys_node structure extending it by the #when,
- * #presence, #must_size, #tpdf_size, #must and #tpdf members.
+ * #must, #tpdf, and #presence members.
  *
  * The container schema node can be instantiated in the data tree, so the ::lys_node_container can be directly
  * referenced from ::lyd_node#schema.
@@ -1292,6 +1310,10 @@ struct lys_node_container {
                                           node in the list. */
 
     void *priv;                      /**< private caller's data, not used by libyang */
+
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
 
     /* specific container's data */
     struct lys_when *when;           /**< when statement (optional) */
@@ -1380,6 +1402,10 @@ struct lys_node_leaf {
 
     void *priv;                      /**< private caller's data, not used by libyang */
 
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
+
     /* specific leaf's data */
     struct lys_when *when;           /**< when statement (optional) */
     struct lys_restr *must;          /**< array of must constraints */
@@ -1429,6 +1455,10 @@ struct lys_node_leaflist {
                                           node in the list. */
 
     void *priv;                      /**< private caller's data, not used by libyang */
+
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
 
     /* specific leaf-list's data */
     struct lys_when *when;           /**< when statement (optional) */
@@ -1480,6 +1510,10 @@ struct lys_node_list {
                                           node in the list. */
 
     void *priv;                      /**< private caller's data, not used by libyang */
+
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
 
     /* specific list's data */
     struct lys_when *when;           /**< when statement (optional) */
@@ -1533,6 +1567,10 @@ struct lys_node_anydata {
                                           node in the list. */
 
     void *priv;                      /**< private caller's data, not used by libyang */
+
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
 
     /* specific anyxml's data */
     struct lys_when *when;           /**< when statement (optional) */
@@ -1748,6 +1786,10 @@ struct lys_node_notif {
 
     void *priv;                      /**< private caller's data, not used by libyang */
 
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
+
     /* specific rpc's data */
     struct lys_tpdf *tpdf;           /**< array of typedefs */
     struct lys_restr *must;          /**< array of must constraints */
@@ -1789,6 +1831,10 @@ struct lys_node_rpc_action {
                                           node in the list. */
 
     void *priv;                      /**< private caller's data, not used by libyang */
+
+#ifdef LY_ENABLED_CACHE
+    uint8_t hash[LYS_NODE_HASH_COUNT]; /**< schema hash required for LYB printer/parser */
+#endif
 
     /* specific rpc's data */
     struct lys_tpdf *tpdf;           /**< array of typedefs */
@@ -2044,7 +2090,7 @@ struct lys_restr {
     const char *emsg;                /**< error-message (optional) */
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     uint8_t ext_size;                /**< number of elements in #ext array */
-    uint16_t flags;                  /**< only one flag can be specified, #LYS_XPATH_DEP */
+    uint16_t flags;                  /**< only flags #LYS_XPCONF_DEP and #LYS_XPSTATE_DEP can be specified */
 };
 
 /**
@@ -2056,7 +2102,7 @@ struct lys_when {
     const char *ref;                 /**< reference (optional) */
     struct lys_ext_instance **ext;   /**< array of pointers to the extension instances */
     uint8_t ext_size;                /**< number of elements in #ext array */
-    uint16_t flags;                  /**< only one flag can be specified, #LYS_XPATH_DEP */
+    uint16_t flags;                  /**< only flags #LYS_XPCONF_DEP and #LYS_XPSTATE_DEP can be specified */
 };
 
 /**
@@ -2087,8 +2133,6 @@ struct lys_ident {
 /**
  * @brief Load a schema into the specified context.
  *
- * LY_IN_YANG (YANG) format is not yet supported.
- *
  * @param[in] ctx libyang context where to process the data model.
  * @param[in] data The string containing the dumped data model in the specified
  * format.
@@ -2099,8 +2143,6 @@ const struct lys_module *lys_parse_mem(struct ly_ctx *ctx, const char *data, LYS
 
 /**
  * @brief Read a schema from file descriptor into the specified context.
- *
- * LY_IN_YANG (YANG) format is not yet supported.
  *
  * \note Current implementation supports only reading data from standard (disk) file, not from sockets, pipes, etc.
  *
@@ -2115,14 +2157,28 @@ const struct lys_module *lys_parse_fd(struct ly_ctx *ctx, int fd, LYS_INFORMAT f
 /**
  * @brief Load a schema into the specified context from a file.
  *
- * LY_IN_YANG (YANG) format is not yet supported.
- *
  * @param[in] ctx libyang context where to process the data model.
  * @param[in] path Path to the file with the model in the specified format.
  * @param[in] format Format of the input data (YANG or YIN).
  * @return Pointer to the data model structure or NULL on error.
  */
 const struct lys_module *lys_parse_path(struct ly_ctx *ctx, const char *path, LYS_INFORMAT format);
+
+/**
+ * @brief Search for the schema file in the specified searchpaths.
+ *
+ * @param[in] searchpaths NULL-terminated array of paths to be searched (recursively). Current working
+ * directory is searched automatically (but non-recursively if not in the provided list). Caller can use
+ * result of the ly_ctx_get_searchdirs().
+ * @param[in] name Name of the schema to find.
+ * @param[in] revision Revision of the schema to find. If NULL, the newest found schema filepath is returned.
+ * @param[out] localfile Mandatory output variable containing absolute path of the found schema. If no schema
+ * complying the provided restriction is found, NULL is set.
+ * @param[out] format Optional output variable containing expected format of the schema document according to the
+ * file suffix.
+ * @return EXIT_FAILURE on error, EXIT_SUCCESS otherwise (even if the file is not found, then the *localfile is NULL).
+ */
+int lys_search_localfile(const char * const *searchpaths, const char *name, const char *revision, char **localfile, LYS_INFORMAT *format);
 
 /**
  * @brief Get list of all the defined features in the module and its submodules.

@@ -584,7 +584,7 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     lydict_remove(ctx, module_name);
     lydict_remove(ctx, value);
 
-    if (type->flags & LYTYPE_GRP) {
+    if (type->value_flags & LY_VALUE_UNRESGRP) {
         /* resolved type in grouping, decrease the grouping's nacm number to indicate that one less
          * unresolved item left inside the grouping, LYTYPE_GRP used as a flag for types inside a grouping. */
         for (siter = parent; siter && (siter->nodetype != LYS_GROUPING); siter = lys_parent(siter));
@@ -595,7 +595,7 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
             LOGINT(ctx);
             goto error;
         }
-        type->flags &= ~LYTYPE_GRP;
+        type->value_flags &= ~LY_VALUE_UNRESGRP;
     }
     type->base = type->der->type.base;
 
@@ -1429,24 +1429,22 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
             LY_TREE_FOR(yin->child, node) {
                 GETVAL(ctx, value, node, "value");
 
-                if (!(ctx->models.flags & LY_CTX_TRUSTED)) {
-                    if (in_grp) {
-                        /* in grouping, just check the pattern syntax */
-                        if (lyp_check_pattern(ctx, value, NULL)) {
-                            goto error;
-                        }
+                if (in_grp) {
+                    /* in grouping, just check the pattern syntax */
+                    if (!(ctx->models.flags & LY_CTX_TRUSTED) && lyp_check_pattern(ctx, value, NULL)) {
+                        goto error;
                     }
-#ifdef LY_ENABLED_CACHE
-                    else {
-                        /* outside grouping, check syntax and precompile pattern for later use by libpcre */
-                        if (lyp_precompile_pattern(ctx, value,
-                                (pcre**)&type->info.str.patterns_pcre[type->info.str.pat_count * 2],
-                                (pcre_extra**)&type->info.str.patterns_pcre[type->info.str.pat_count * 2 + 1])) {
-                            goto error;
-                        }
-                    }
-#endif
                 }
+#ifdef LY_ENABLED_CACHE
+                else {
+                    /* outside grouping, check syntax and precompile pattern for later use by libpcre */
+                    if (lyp_precompile_pattern(ctx, value,
+                            (pcre **)&type->info.str.patterns_pcre[type->info.str.pat_count * 2],
+                            (pcre_extra **)&type->info.str.patterns_pcre[type->info.str.pat_count * 2 + 1])) {
+                        goto error;
+                    }
+                }
+#endif
                 restr = &type->info.str.patterns[type->info.str.pat_count]; /* shortcut */
                 type->info.str.pat_count++;
 
@@ -2174,12 +2172,13 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
     unsigned int u;
     struct ly_ctx *ctx = module->ctx;
     struct lys_deviate *d = NULL;
-    struct lys_node *node = NULL, *parent, *dev_target = NULL;
+    struct lys_node *node, *parent, *dev_target = NULL;
     struct lys_node_choice *choice = NULL;
     struct lys_node_leaf *leaf = NULL;
     struct ly_set *dflt_check = ly_set_new(), *set;
     struct lys_node_list *list = NULL;
     struct lys_node_leaflist *llist = NULL;
+    struct lys_node_inout *inout;
     struct lys_type *t = NULL;
     uint8_t *trg_must_size = NULL;
     struct lys_restr **trg_must = NULL;
@@ -2324,12 +2323,31 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
             /* unlink and store the original node */
             parent = dev_target->parent;
             lys_node_unlink(dev_target);
-            if (parent && (parent->nodetype & (LYS_AUGMENT | LYS_USES))) {
-                /* hack for augment, because when the original will be sometime reconnected back, we actually need
-                 * to reconnect it to both - the augment and its target (which is deduced from the deviations target
-                 * path), so we need to remember the augment as an addition */
-                /* remember uses parent so we can reconnect to it */
-                dev_target->parent = parent;
+            if (parent) {
+                if (parent->nodetype & (LYS_AUGMENT | LYS_USES)) {
+                    /* hack for augment, because when the original will be sometime reconnected back, we actually need
+                     * to reconnect it to both - the augment and its target (which is deduced from the deviations target
+                     * path), so we need to remember the augment as an addition */
+                    /* remember uses parent so we can reconnect to it */
+                    dev_target->parent = parent;
+                } else if (parent->nodetype & (LYS_RPC | LYS_ACTION)) {
+                    /* re-create implicit node */
+                    inout = calloc(1, sizeof *inout);
+                    LY_CHECK_ERR_GOTO(!inout, LOGMEM(ctx), error);
+
+                    inout->nodetype = dev_target->nodetype;
+                    inout->name = lydict_insert(ctx, (inout->nodetype == LYS_INPUT) ? "input" : "output", 0);
+                    inout->module = dev_target->module;
+                    inout->flags = LYS_IMPLICIT;
+
+                    /* insert it manually */
+                    assert(parent->child && !parent->child->next
+                           && (parent->child->nodetype == (inout->nodetype == LYS_INPUT ? LYS_OUTPUT : LYS_INPUT)));
+                    parent->child->next = (struct lys_node *)inout;
+                    inout->prev = parent->child;
+                    parent->child->prev = (struct lys_node *)inout;
+                    inout->parent = parent;
+                }
             }
             dev->orig_node = dev_target;
 
@@ -3106,9 +3124,11 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
         if (module != mod) {
             mod->deviated = 1;            /* main module */
             parent->module->deviated = 1; /* possible submodule */
-            if (lys_set_implemented(mod)) {
-                LOGERR(ctx, ly_errno, "Setting the deviated module \"%s\" implemented failed.", mod->name);
-                goto error;
+            if (!mod->implemented) {
+                mod->implemented = 1;
+                if (unres_schema_add_node(mod, unres, NULL, UNRES_MOD_IMPLEMENT, NULL) == -1) {
+                    goto error;
+                }
             }
         }
     }
@@ -5451,9 +5471,7 @@ read_yin_list(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     }
 
     if (list->keys_str) {
-        /* check that we are not in grouping */
-        for (node = parent; node && node->nodetype != LYS_GROUPING; node = lys_parent(node));
-        if (!node && unres_schema_add_node(module, unres, list, UNRES_LIST_KEYS, NULL) == -1) {
+        if (unres_schema_add_node(module, unres, list, UNRES_LIST_KEYS, NULL) == -1) {
             goto error;
         }
     } /* else config false list without a key, key_str presence in case of config true is checked earlier */
@@ -7094,6 +7112,9 @@ read_sub_module(struct lys_module *module, struct lys_submodule *submodule, stru
             }
 
         } else if (!strcmp(child->name, "deviation")) {
+            /* must be implemented in this case */
+            trg->implemented = 1;
+
             r = fill_yin_deviation(trg, child, &trg->deviation[trg->deviation_size], unres);
             trg->deviation_size++;
             if (r) {
@@ -7319,6 +7340,11 @@ yin_read_module_(struct ly_ctx *ctx, struct lyxml_elem *yin, const char *revisio
     if (ret == 1) {
         assert(!unres->count);
     } else {
+        /* make this module implemented if was not from start */
+        if (!implement && module->implemented && (unres_schema_add_node(module, unres, NULL, UNRES_MOD_IMPLEMENT, NULL) == -1)) {
+            goto error;
+        }
+
         /* resolve rest of unres items */
         if (unres->count && resolve_unres_schema(module, unres)) {
             goto error;
@@ -7347,15 +7373,6 @@ yin_read_module_(struct ly_ctx *ctx, struct lyxml_elem *yin, const char *revisio
 
     /* add into context if not already there */
     if (!ret) {
-        if (module->deviation_size && !module->implemented) {
-            LOGVRB("Module \"%s\" includes deviations, changing its conformance to \"implement\".", module->name);
-            /* deviations always causes target to be made implemented,
-             * but augents and leafrefs not, so we have to apply them now */
-            if (lys_set_implemented(module)) {
-                goto error;
-            }
-        }
-
         if (lyp_ctx_add_module(module)) {
             goto error;
         }
@@ -8202,7 +8219,6 @@ lyp_yin_parse_complex_ext(struct lys_module *mod, struct lys_ext_instance_comple
 
             *(struct lys_restr **)p = calloc(1, sizeof(struct lys_restr));
             LY_CHECK_ERR_GOTO(!*(struct lys_restr **)p, LOGMEM(mod->ctx), error);
-            (*(struct lys_restr **)p)->expr = lydict_insert(mod->ctx, value, 0);
 
             modifier = 0x06; /* ACK */
             if (mod->version >= 2) {

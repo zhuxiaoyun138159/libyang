@@ -61,6 +61,20 @@ std::string Module::print_mem(LYS_OUTFORMAT format, int options) {
     free(strp);
     return s_strp;
 }
+std::string Module::print_mem(LYS_OUTFORMAT format, const char *target, int options) {
+    char *strp = nullptr;
+    int rc = 0;
+
+    rc = lys_print_mem(&strp, module, format, target, 0, options);
+    if (rc) {
+        check_libyang_error(module->ctx);
+        return nullptr;
+    }
+
+    std::string s_strp = strp;
+    free(strp);
+    return s_strp;
+}
 Submodule::~Submodule() {};
 S_Revision Submodule::rev() LY_NEW(submodule, rev, Revision);
 std::vector<S_Deviation> *Submodule::deviation() LY_NEW_LIST(submodule, deviation, deviation_size, Deviation);
@@ -183,7 +197,7 @@ Type::~Type() {};
 std::vector<S_Ext_Instance> *Type::ext() LY_NEW_P_LIST(type, ext, ext_size, Ext_Instance);
 S_Tpdf Type::der() {return type->der ? std::make_shared<Tpdf>(type->der, deleter) : nullptr;};
 S_Tpdf Type::parent() {return type->parent ? std::make_shared<Tpdf>(type->parent, deleter) : nullptr;};
-S_Type_Info Type::info() {return std::make_shared<Type_Info>(type->info, &type->base, type->flags, deleter);};
+S_Type_Info Type::info() {return std::make_shared<Type_Info>(type->info, &type->base, type->value_flags, deleter);};
 
 Iffeature::Iffeature(struct lys_iffeature *iffeature, S_Deleter deleter):
     iffeature(iffeature),

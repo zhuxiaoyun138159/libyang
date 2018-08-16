@@ -160,6 +160,7 @@ error:
     free(value);
     lydict_remove(module->ctx, imp_old->dsc);
     lydict_remove(module->ctx, imp_old->ref);
+    lydict_remove(module->ctx, imp_old->prefix);
     lys_extension_instances_free(module->ctx, imp_old->ext, imp_old->ext_size, NULL);
     return EXIT_FAILURE;
 }
@@ -467,7 +468,6 @@ int
 yang_read_key(struct lys_module *module, struct lys_node_list *list, struct unres_schema *unres)
 {
     char *exp, *value;
-    struct lys_node *node;
 
     exp = value = (char *) list->keys;
     while ((value = strpbrk(value, " \t\n"))) {
@@ -482,8 +482,7 @@ yang_read_key(struct lys_module *module, struct lys_node_list *list, struct unre
     list->keys = calloc(list->keys_size, sizeof *list->keys);
     LY_CHECK_ERR_RETURN(!list->keys, LOGMEM(module->ctx), EXIT_FAILURE);
 
-    for (node = list->parent; node && node->nodetype != LYS_GROUPING; node = lys_parent(node));
-    if (!node && unres_schema_add_node(module, unres, list, UNRES_LIST_KEYS, NULL) == -1) {
+    if (unres_schema_add_node(module, unres, list, UNRES_LIST_KEYS, NULL) == -1) {
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;
@@ -673,7 +672,7 @@ yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_
     lydict_remove(ctx, module_name);
     lydict_remove(ctx, value);
 
-    if (type->flags & LYTYPE_GRP) {
+    if (type->value_flags & LY_VALUE_UNRESGRP) {
         /* resolved type in grouping, decrease the grouping's nacm number to indicate that one less
          * unresolved item left inside the grouping, LYTYPE_GRP used as a flag for types inside a grouping.  */
         for (siter = parent; siter && (siter->nodetype != LYS_GROUPING); siter = lys_parent(siter));
@@ -684,7 +683,7 @@ yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_
             LOGINT(ctx);
             goto error;
         }
-        type->flags &= ~LYTYPE_GRP;
+        type->value_flags &= ~LY_VALUE_UNRESGRP;
     }
 
     /* check status */
@@ -1209,6 +1208,8 @@ error:
 int
 yang_read_fraction(struct ly_ctx *ctx, struct yang_type *typ, uint32_t value)
 {
+    uint32_t i;
+
     if (typ->base == 0 || typ->base == LY_TYPE_DEC64) {
         typ->base = LY_TYPE_DEC64;
     } else {
@@ -1225,6 +1226,10 @@ yang_read_fraction(struct ly_ctx *ctx, struct yang_type *typ, uint32_t value)
         goto error;
     }
     typ->type->info.dec64.dig = value;
+    typ->type->info.dec64.div = 10;
+    for (i = 1; i < value; i++) {
+        typ->type->info.dec64.div *= 10;
+    }
     return EXIT_SUCCESS;
 
 error:
@@ -2606,7 +2611,6 @@ yang_parse_ext_substatement(struct lys_module *module, struct unres_schema *unre
 struct lys_module *
 yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const char *revision, int implement)
 {
-
     struct lys_module *module = NULL, *tmp_mod;
     struct unres_schema *unres = NULL;
     struct lys_node *node = NULL;
@@ -2631,6 +2635,10 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
     ret = yang_parse_mem(module, NULL, unres, data, size, &node);
     if (ret == -1) {
         if (ly_vecode(ctx) == LYVE_SUBMODULE) {
+            /* Remove this module from the list of processed modules,
+               as we're about to free it */
+            lyp_check_circmod_pop(ctx);
+
             free(module);
             module = NULL;
         } else {
@@ -2644,12 +2652,25 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
             goto error;
         }
 
+        if (!implement && module->implemented && lys_make_implemented_r(module, unres)) {
+            goto error;
+        }
+
         if (unres->count && resolve_unres_schema(module, unres)) {
+            goto error;
+        }
+
+        /* check correctness of includes */
+        if (lyp_check_include_missing(module)) {
             goto error;
         }
     }
 
     lyp_sort_revisions(module);
+
+    if (lyp_rfn_apply_ext(module) || lyp_deviation_apply_ext(module)) {
+        goto error;
+    }
 
     if (revision) {
         /* check revision of the parsed model */
@@ -2662,26 +2683,8 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
 
     /* add into context if not already there */
     if (!ret) {
-        /* check correctness of includes */
-        if (lyp_check_include_missing(module)) {
-            goto error;
-        }
-
-        if (lyp_rfn_apply_ext(module) || lyp_deviation_apply_ext(module)) {
-            goto error;
-        }
-
         if (lyp_ctx_add_module(module)) {
             goto error;
-        }
-
-        if (module->deviation_size && !module->implemented) {
-            LOGVRB("Module \"%s\" includes deviations, changing its conformance to \"implement\".", module->name);
-            /* deviations always causes target to be made implemented,
-             * but augents and leafrefs not, so we have to apply them now */
-            if (lys_set_implemented(module)) {
-                goto error;
-            }
         }
 
         /* remove our submodules from the parsed submodules list */
@@ -2697,16 +2700,16 @@ yang_read_module(struct ly_ctx *ctx, const char* data, unsigned int size, const 
         lys_free(tmp_mod, NULL, 0, 0);
     }
 
-    lyp_check_circmod_pop(ctx);
     unres_schema_free(NULL, &unres, 0);
+    lyp_check_circmod_pop(ctx);
     LOGVRB("Module \"%s%s%s\" successfully parsed as %s.", module->name, (module->rev_size ? "@" : ""),
            (module->rev_size ? module->rev[0].date : ""), (module->implemented ? "implemented" : "imported"));
     return module;
 
 error:
     /* cleanup */
-    lyp_check_circmod_pop(ctx);
     unres_schema_free(module, &unres, 1);
+
     if (!module) {
         if (ly_vecode(ctx) != LYVE_SUBMODULE) {
             LOGERR(ctx, ly_errno, "Module parsing failed.");
@@ -2720,6 +2723,7 @@ error:
         LOGERR(ctx, ly_errno, "Module parsing failed.");
     }
 
+    lyp_check_circmod_pop(ctx);
     lys_sub_module_remove_devs_augs(module);
     lyp_del_includedup(module, 1);
     lys_free(module, NULL, 0, 1);
@@ -3276,6 +3280,9 @@ free_yang_common(struct lys_module *module, struct lys_node *node)
     for (i = 0; i < module->deviation_size; ++i) {
         yang_free_deviate(module->ctx, &module->deviation[i], 0);
         free(module->deviation[i].deviate);
+        lydict_remove(module->ctx, module->deviation[i].target_name);
+        lydict_remove(module->ctx, module->deviation[i].dsc);
+        lydict_remove(module->ctx, module->deviation[i].ref);
     }
     module->deviation_size = 0;
 }
@@ -4490,6 +4497,7 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
     const char *value, *target_name;
     struct lys_node_leaflist *llist;
     struct lys_node_leaf *leaf;
+    struct lys_node_inout *inout;
     struct unres_schema tmp_unres;
     struct lys_module *mod;
 
@@ -4532,12 +4540,31 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
         /* unlink and store the original node */
         parent = dev_target->parent;
         lys_node_unlink(dev_target);
-        if (parent && (parent->nodetype & (LYS_AUGMENT | LYS_USES))) {
-            /* hack for augment, because when the original will be sometime reconnected back, we actually need
-             * to reconnect it to both - the augment and its target (which is deduced from the deviations target
-             * path), so we need to remember the augment as an addition */
-            /* remember uses parent so we can reconnect to it */
-            dev_target->parent = parent;
+        if (parent) {
+            if (parent->nodetype & (LYS_AUGMENT | LYS_USES)) {
+                /* hack for augment, because when the original will be sometime reconnected back, we actually need
+                 * to reconnect it to both - the augment and its target (which is deduced from the deviations target
+                 * path), so we need to remember the augment as an addition */
+                /* remember uses parent so we can reconnect to it */
+                dev_target->parent = parent;
+            } else if (parent->nodetype & (LYS_RPC | LYS_ACTION)) {
+                /* re-create implicit node */
+                inout = calloc(1, sizeof *inout);
+                LY_CHECK_ERR_GOTO(!inout, LOGMEM(module->ctx), error);
+
+                inout->nodetype = dev_target->nodetype;
+                inout->name = lydict_insert(module->ctx, (inout->nodetype == LYS_INPUT) ? "input" : "output", 0);
+                inout->module = dev_target->module;
+                inout->flags = LYS_IMPLICIT;
+
+                /* insert it manually */
+                assert(parent->child && !parent->child->next
+                    && (parent->child->nodetype == (inout->nodetype == LYS_INPUT ? LYS_OUTPUT : LYS_INPUT)));
+                parent->child->next = (struct lys_node *)inout;
+                inout->prev = parent->child;
+                parent->child->prev = (struct lys_node *)inout;
+                inout->parent = parent;
+            }
         }
         dev->orig_node = dev_target;
     } else {
@@ -4602,9 +4629,11 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
         if (module != mod) {
             mod->deviated = 1;            /* main module */
             parent->module->deviated = 1; /* possible submodule */
-            if (lys_set_implemented(mod)) {
-                LOGERR(module->ctx, ly_errno, "Setting the deviated module \"%s\" implemented failed.", mod->name);
-                goto error;
+            if (!mod->implemented) {
+                mod->implemented = 1;
+                if (unres_schema_add_node(mod, unres, NULL, UNRES_MOD_IMPLEMENT, NULL) == -1) {
+                    goto error;
+                }
             }
         }
     }

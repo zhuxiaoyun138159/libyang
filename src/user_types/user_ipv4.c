@@ -15,8 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 
-#include <libyang/user_types.h>
+#include "../user_types.h"
 
 static int
 ipv4_store_clb(const char *type_name, const char *value_str, lyd_val *value, char **err_msg)

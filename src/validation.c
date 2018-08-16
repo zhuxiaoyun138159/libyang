@@ -242,7 +242,7 @@ lyv_data_context(const struct lyd_node *node, int options, struct unres_data *un
     }
 
     /* check all relevant when conditions */
-    if (!(options & (LYD_OPT_TRUSTED | LYD_OPT_NOTIF_FILTER | LYD_OPT_EDIT | LYD_OPT_GET | LYD_OPT_GETCONFIG))
+    if (!(options & (LYD_OPT_NOTIF_FILTER | LYD_OPT_EDIT | LYD_OPT_GET | LYD_OPT_GETCONFIG))
             && (node->when_status & LYD_WHEN)) {
         if (unres_data_add(unres, (struct lyd_node *)node, UNRES_WHEN)) {
             return 1;
@@ -375,7 +375,7 @@ lyv_data_unique(struct lyd_node *node, struct lyd_node *start)
             hash = dict_hash_multi(hash, NULL, 0);
 
             /* insert into the hashtable */
-            if (lyht_insert(keystable, &set->set.d[u], hash)) {
+            if (lyht_insert(keystable, &set->set.d[u], hash, NULL)) {
                 ret = 1;
                 goto unique_cleanup;
             }
@@ -410,7 +410,7 @@ lyv_data_unique(struct lyd_node *node, struct lyd_node *start)
                 hash = dict_hash_multi(hash, NULL, 0);
 
                 /* insert into the hashtable */
-                if (lyht_insert(uniquetables[j], &set->set.d[u], hash)) {
+                if (lyht_insert(uniquetables[j], &set->set.d[u], hash, NULL)) {
                     ret = 1;
                     goto unique_cleanup;
                 }
@@ -446,7 +446,7 @@ find_orig_type(struct lys_type *par_type, LY_DATA_TYPE base_type)
     if (type->base == base_type) {
         /* we have the result */
         return type;
-    } else if ((type->base == LY_TYPE_LEAFREF) && !(type->flags & LYTYPE_UNRES)) {
+    } else if ((type->base == LY_TYPE_LEAFREF) && !(type->value_flags & LY_VALUE_UNRES)) {
         /* go through the leafref */
         assert(type->info.lref.target);
         return find_orig_type(&((struct lys_node_leaf *)type->info.lref.target)->type, base_type);
@@ -675,19 +675,22 @@ lyv_data_content(struct lyd_node *node, int options, struct unres_data *unres)
         node->validity &= ~LYD_VAL_MAND;
     }
 
-    if (!(options & (LYD_OPT_TRUSTED | LYD_OPT_GET | LYD_OPT_GETCONFIG))) {
-        /* skip key uniqueness check in case of get/get-config data */
-        if (schema->nodetype & (LYS_LIST | LYS_CONTAINER)) {
-            LY_TREE_FOR(schema->child, siter) {
-                if (siter->nodetype & (LYS_LIST | LYS_LEAFLIST)) {
-                    LY_TREE_FOR(node->child, diter) {
-                        if (diter->schema == siter && (diter->validity & LYD_VAL_UNIQUE)) {
+    if (schema->nodetype & (LYS_LIST | LYS_CONTAINER | LYS_NOTIF | LYS_RPC | LYS_ACTION)) {
+        LY_TREE_FOR(schema->child, siter) {
+            if (siter->nodetype & (LYS_LIST | LYS_LEAFLIST)) {
+                LY_TREE_FOR(node->child, diter) {
+                    if (diter->schema == siter && (diter->validity & LYD_VAL_UNIQUE)) {
+                        /* skip key uniqueness check in case of get/get-config data */
+                        if (!(options & (LYD_OPT_TRUSTED | LYD_OPT_GET | LYD_OPT_GETCONFIG))) {
                             if (lyv_data_unique(diter, node->child)) {
                                 return 1;
                             }
-                            /* all schema instances checked, continue with another schema node */
-                            break;
+                        } else {
+                            /* always remove the flag */
+                            diter->validity &= ~LYD_VAL_UNIQUE;
                         }
+                        /* all schema instances checked, continue with another schema node */
+                        break;
                     }
                 }
             }

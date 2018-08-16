@@ -1644,7 +1644,7 @@ resolve_iffeature_compile(struct lys_iffeature *iffeat_expr, const char *value, 
         }
         i++; /* get back by one step */
 
-        if (!strncmp(&c[i], "not ", 4)) {
+        if (!strncmp(&c[i], "not", 3) && isspace(c[i + 3])) {
             if (stack.index && stack.stack[stack.index - 1] == LYS_IFF_NOT) {
                 /* double not */
                 iff_stack_pop(&stack);
@@ -1653,7 +1653,7 @@ resolve_iffeature_compile(struct lys_iffeature *iffeat_expr, const char *value, 
                  * as in case of AND and OR */
                 iff_stack_push(&stack, LYS_IFF_NOT);
             }
-        } else if (!strncmp(&c[i], "and ", 4)) {
+        } else if (!strncmp(&c[i], "and", 3) && isspace(c[i + 3])) {
             /* as for OR - pop from the stack all operators with the same or higher
              * priority and store them to the result, then push the AND to the stack */
             while (stack.index && stack.stack[stack.index - 1] <= LYS_IFF_AND) {
@@ -1661,7 +1661,7 @@ resolve_iffeature_compile(struct lys_iffeature *iffeat_expr, const char *value, 
                 iff_setop(iffeat_expr->expr, op, expr_size--);
             }
             iff_stack_push(&stack, LYS_IFF_AND);
-        } else if (!strncmp(&c[i], "or ", 3)) {
+        } else if (!strncmp(&c[i], "or", 2) && isspace(c[i + 2])) {
             while (stack.index && stack.stack[stack.index - 1] <= LYS_IFF_OR) {
                 op = iff_stack_pop(&stack);
                 iff_setop(iffeat_expr->expr, op, expr_size--);
@@ -1987,8 +1987,8 @@ resolve_schema_nodeid(const char *nodeid, const struct lys_node *start_parent, c
                 aux_mod = cur_module;
             }
 
-            /* if the module is implemented, all the augments will be connected */
-            if (!aux_mod->implemented && !extended) {
+            /* look into augments */
+            if (!extended) {
 get_next_augment:
                 last_aug = lys_getnext_target_aug(last_aug, aux_mod, start_parent);
             }
@@ -2611,7 +2611,7 @@ resolve_partial_json_data_nodeid(const char *nodeid, const char *llist_value, st
     struct lyd_node_leaf_list *llist;
     const struct lys_module *prev_mod;
     struct ly_ctx *ctx;
-    const struct lys_node *ssibling;
+    const struct lys_node *ssibling, *sparent;
     struct lys_node_list *slist;
     struct parsed_pred pp;
 
@@ -2661,7 +2661,21 @@ resolve_partial_json_data_nodeid(const char *nodeid, const char *llist_value, st
     while (1) {
         /* find the correct schema node first */
         ssibling = NULL;
-        while ((ssibling = lys_getnext(ssibling, (start && start->parent) ? start->parent->schema : NULL, prev_mod, 0))) {
+        sparent = (start && start->parent) ? start->parent->schema : NULL;
+        while ((ssibling = lys_getnext(ssibling, sparent, prev_mod, 0))) {
+            /* skip invalid input/output nodes */
+            if (sparent && (sparent->nodetype & (LYS_RPC | LYS_ACTION))) {
+                if (options & LYD_PATH_OPT_OUTPUT) {
+                    if (lys_parent(ssibling)->nodetype == LYS_INPUT) {
+                        continue;
+                    }
+                } else {
+                    if (lys_parent(ssibling)->nodetype == LYS_OUTPUT) {
+                        continue;
+                    }
+                }
+            }
+
             if (!schema_nodeid_siblingcheck(ssibling, prev_mod, mod_name, mod_name_len, name, nam_len)) {
                 break;
             }
@@ -3585,7 +3599,7 @@ check_default(struct lys_type *type, const char **value, struct lys_module *modu
             }
         }
     } else {
-        if (!lyp_parse_value(type, &node.value_str, NULL, &node, NULL, module, 1, 1)) {
+        if (!lyp_parse_value(type, &node.value_str, NULL, &node, NULL, module, 1, 1, 0)) {
             /* possible forward reference */
             ret = EXIT_FAILURE;
             if (base_tpdf) {
@@ -4001,6 +4015,115 @@ resolve_schema_leafref_predicate(const char *path, const struct lys_node *contex
     return parsed;
 }
 
+static int
+check_leafref_features(struct lys_type *type)
+{
+    struct lys_node *iter;
+    struct ly_set *src_parents, *trg_parents, *features;
+    struct lys_node_augment *aug;
+    struct ly_ctx *ctx = ((struct lys_tpdf *)type->parent)->module->ctx;
+    unsigned int i, j, size, x;
+    int ret = EXIT_SUCCESS;
+
+    assert(type->parent);
+
+    src_parents = ly_set_new();
+    trg_parents = ly_set_new();
+    features = ly_set_new();
+
+    /* get parents chain of source (leafref) */
+    for (iter = (struct lys_node *)type->parent; iter; iter = lys_parent(iter)) {
+        if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
+            continue;
+        }
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT)) {
+            aug = (struct lys_node_augment *)iter->parent;
+            if ((aug->module->implemented && (aug->flags & LYS_NOTAPPLIED)) || !aug->target) {
+                /* unresolved augment, wait until it's resolved */
+                LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, aug,
+                       "Cannot check leafref \"%s\" if-feature consistency because of an unresolved augment.", type->info.lref.path);
+                ret = EXIT_FAILURE;
+                goto cleanup;
+            }
+            /* also add this augment */
+            ly_set_add(src_parents, aug, LY_SET_OPT_USEASLIST);
+        }
+        ly_set_add(src_parents, iter, LY_SET_OPT_USEASLIST);
+    }
+    /* get parents chain of target */
+    for (iter = (struct lys_node *)type->info.lref.target; iter; iter = lys_parent(iter)) {
+        if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
+            continue;
+        }
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT)) {
+            aug = (struct lys_node_augment *)iter->parent;
+            if ((aug->module->implemented && (aug->flags & LYS_NOTAPPLIED)) || !aug->target) {
+                /* unresolved augment, wait until it's resolved */
+                LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, aug,
+                       "Cannot check leafref \"%s\" if-feature consistency because of an unresolved augment.", type->info.lref.path);
+                ret = EXIT_FAILURE;
+                goto cleanup;
+            }
+        }
+        ly_set_add(trg_parents, iter, LY_SET_OPT_USEASLIST);
+    }
+
+    /* compare the features used in if-feature statements in the rest of both
+     * chains of parents. The set of features used for target must be a subset
+     * of features used for the leafref. This is not a perfect, we should compare
+     * the truth tables but it could require too much resources, so we simplify that */
+    for (i = 0; i < src_parents->number; i++) {
+        iter = src_parents->set.s[i]; /* shortcut */
+        if (!iter->iffeature_size) {
+            continue;
+        }
+        for (j = 0; j < iter->iffeature_size; j++) {
+            resolve_iffeature_getsizes(&iter->iffeature[j], NULL, &size);
+            for (; size; size--) {
+                if (!iter->iffeature[j].features[size - 1]) {
+                    /* not yet resolved feature, postpone this check */
+                    ret = EXIT_FAILURE;
+                    goto cleanup;
+                }
+                ly_set_add(features, iter->iffeature[j].features[size - 1], 0);
+            }
+        }
+    }
+    x = features->number;
+    for (i = 0; i < trg_parents->number; i++) {
+        iter = trg_parents->set.s[i]; /* shortcut */
+        if (!iter->iffeature_size) {
+            continue;
+        }
+        for (j = 0; j < iter->iffeature_size; j++) {
+            resolve_iffeature_getsizes(&iter->iffeature[j], NULL, &size);
+            for (; size; size--) {
+                if (!iter->iffeature[j].features[size - 1]) {
+                    /* not yet resolved feature, postpone this check */
+                    ret = EXIT_FAILURE;
+                    goto cleanup;
+                }
+                if ((unsigned)ly_set_add(features, iter->iffeature[j].features[size - 1], 0) >= x) {
+                    /* the feature is not present in features set of target's parents chain */
+                    LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, type->parent, "leafref", type->info.lref.path);
+                    LOGVAL(ctx, LYE_SPEC, LY_VLOG_PREV, NULL,
+                           "Leafref is not conditional based on \"%s\" feature as its target.",
+                           iter->iffeature[j].features[size - 1]->name);
+                    ret = -1;
+                    goto cleanup;
+                }
+            }
+        }
+    }
+
+cleanup:
+    ly_set_free(features);
+    ly_set_free(src_parents);
+    ly_set_free(trg_parents);
+
+    return ret;
+}
+
 /**
  * @brief Resolve a path (leafref) in JSON schema context. Logs directly.
  *
@@ -4011,7 +4134,7 @@ resolve_schema_leafref_predicate(const char *path, const struct lys_node *contex
  * @return EXIT_SUCCESS on success, EXIT_FAILURE on forward reference, -1 on error.
  */
 static int
-resolve_schema_leafref(const char *path, struct lys_node *parent, const struct lys_node **ret)
+resolve_schema_leafref(struct lys_type *type, struct lys_node *parent, struct unres_schema *unres)
 {
     const struct lys_node *node, *op_node = NULL, *tmp_parent;
     struct lys_node_augment *last_aug;
@@ -4021,144 +4144,164 @@ resolve_schema_leafref(const char *path, struct lys_node *parent, const struct l
     int i, first_iter;
     struct ly_ctx *ctx = parent->module->ctx;
 
-    first_iter = 1;
-    parent_times = 0;
-    id = path;
+    if (!type->info.lref.target) {
+        first_iter = 1;
+        parent_times = 0;
+        id = type->info.lref.path;
 
-    /* find operation schema we are in */
-    for (op_node = lys_parent(parent);
-         op_node && !(op_node->nodetype & (LYS_ACTION | LYS_NOTIF | LYS_RPC));
-         op_node = lys_parent(op_node));
+        /* find operation schema we are in */
+        for (op_node = lys_parent(parent);
+            op_node && !(op_node->nodetype & (LYS_ACTION | LYS_NOTIF | LYS_RPC));
+            op_node = lys_parent(op_node));
 
-    cur_module = lys_node_module(parent);
-    do {
-        if ((i = parse_path_arg(cur_module, id, &prefix, &pref_len, &name, &nam_len, &parent_times, &has_predicate)) < 1) {
-            LOGVAL(ctx, LYE_INCHAR, LY_VLOG_LYS, parent, id[-i], &id[-i]);
-            return -1;
-        }
-        id += i;
-
-        /* get the current module */
-        tmp_mod = prefix ? lyp_get_module(cur_module, NULL, 0, prefix, pref_len, 0) : cur_module;
-        if (!tmp_mod) {
-            LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", path);
-            return EXIT_FAILURE;
-        }
-        last_aug = NULL;
-
-        if (first_iter) {
-            if (parent_times == -1) {
-                /* use module data */
-                node = NULL;
-
-            } else if (parent_times > 0) {
-                /* we are looking for the right parent */
-                for (i = 0, node = parent; i < parent_times; i++) {
-                    if (node->parent && (node->parent->nodetype == LYS_AUGMENT)
-                            && !((struct lys_node_augment *)node->parent)->target) {
-                        /* we are in an unresolved augment, cannot evaluate */
-                        LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, node->parent,
-                               "Cannot resolve leafref \"%s\" because it is in an unresolved augment.", path);
-                        return EXIT_FAILURE;
-                    }
-
-                    /* path is supposed to be evaluated in data tree, so we have to skip
-                     * all schema nodes that cannot be instantiated in data tree */
-                    for (node = lys_parent(node);
-                         node && !(node->nodetype & (LYS_CONTAINER | LYS_LIST | LYS_ACTION | LYS_NOTIF | LYS_RPC));
-                         node = lys_parent(node));
-
-                    if (!node) {
-                        if (i == parent_times - 1) {
-                            /* top-level */
-                            break;
-                        }
-
-                        /* higher than top-level */
-                        LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", path);
-                        return EXIT_FAILURE;
-                    }
-                }
-            } else {
-                LOGINT(ctx);
-                return -1;
-            }
-        }
-
-        /* find the next node (either in unconnected augment or as a schema sibling, node is NULL for top-level node -
-         * - useless to search for that in augments) */
-        if (!tmp_mod->implemented && node) {
-get_next_augment:
-            last_aug = lys_getnext_target_aug(last_aug, tmp_mod, node);
-        }
-
-        tmp_parent = (last_aug ? (struct lys_node *)last_aug : node);
-        node = NULL;
-        while ((node = lys_getnext(node, tmp_parent, tmp_mod, LYS_GETNEXT_NOSTATECHECK))) {
-            if (lys_node_module(node) != lys_main_module(tmp_mod)) {
-                continue;
-            }
-            if (strncmp(node->name, name, nam_len) || node->name[nam_len]) {
-                continue;
-            }
-            /* match */
-            break;
-        }
-        if (!node) {
-            if (last_aug) {
-                /* restore the correct augment target */
-                node = last_aug->target;
-                goto get_next_augment;
-            }
-            LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", path);
-            return EXIT_FAILURE;
-        }
-
-        if (first_iter) {
-            /* set external dependency flag, we can decide based on the first found node */
-            if (op_node && parent_times &&
-                    resolve_schema_leafref_valid_dep_flag(op_node, node, (parent_times == -1 ? 1 : 0))) {
-                parent->flags |= LYS_LEAFREF_DEP;
-            }
-            first_iter = 0;
-        }
-
-        if (has_predicate) {
-            /* we have predicate, so the current result must be list */
-            if (node->nodetype != LYS_LIST) {
-                LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", path);
-                return -1;
-            }
-
-            i = resolve_schema_leafref_predicate(id, node, parent, op_node);
-            if (!i) {
-                return EXIT_FAILURE;
-            } else if (i < 0) {
+        cur_module = lys_node_module(parent);
+        do {
+            if ((i = parse_path_arg(cur_module, id, &prefix, &pref_len, &name, &nam_len, &parent_times, &has_predicate)) < 1) {
+                LOGVAL(ctx, LYE_INCHAR, LY_VLOG_LYS, parent, id[-i], &id[-i]);
                 return -1;
             }
             id += i;
-            has_predicate = 0;
+
+            /* get the current module */
+            tmp_mod = prefix ? lyp_get_module(cur_module, NULL, 0, prefix, pref_len, 0) : cur_module;
+            if (!tmp_mod) {
+                LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", type->info.lref.path);
+                return EXIT_FAILURE;
+            }
+            last_aug = NULL;
+
+            if (first_iter) {
+                if (parent_times == -1) {
+                    /* use module data */
+                    node = NULL;
+
+                } else if (parent_times > 0) {
+                    /* we are looking for the right parent */
+                    for (i = 0, node = parent; i < parent_times; i++) {
+                        if (node->parent && (node->parent->nodetype == LYS_AUGMENT)
+                                && !((struct lys_node_augment *)node->parent)->target) {
+                            /* we are in an unresolved augment, cannot evaluate */
+                            LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, node->parent,
+                                "Cannot resolve leafref \"%s\" because it is in an unresolved augment.", type->info.lref.path);
+                            return EXIT_FAILURE;
+                        }
+
+                        /* path is supposed to be evaluated in data tree, so we have to skip
+                        * all schema nodes that cannot be instantiated in data tree */
+                        for (node = lys_parent(node);
+                            node && !(node->nodetype & (LYS_CONTAINER | LYS_LIST | LYS_ACTION | LYS_NOTIF | LYS_RPC));
+                            node = lys_parent(node));
+
+                        if (!node) {
+                            if (i == parent_times - 1) {
+                                /* top-level */
+                                break;
+                            }
+
+                            /* higher than top-level */
+                            LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", type->info.lref.path);
+                            return EXIT_FAILURE;
+                        }
+                    }
+                } else {
+                    LOGINT(ctx);
+                    return -1;
+                }
+            }
+
+            /* find the next node (either in unconnected augment or as a schema sibling, node is NULL for top-level node -
+            * - useless to search for that in augments) */
+            if (!tmp_mod->implemented && node) {
+    get_next_augment:
+                last_aug = lys_getnext_target_aug(last_aug, tmp_mod, node);
+            }
+
+            tmp_parent = (last_aug ? (struct lys_node *)last_aug : node);
+            node = NULL;
+            while ((node = lys_getnext(node, tmp_parent, tmp_mod, LYS_GETNEXT_NOSTATECHECK))) {
+                if (lys_node_module(node) != lys_main_module(tmp_mod)) {
+                    continue;
+                }
+                if (strncmp(node->name, name, nam_len) || node->name[nam_len]) {
+                    continue;
+                }
+                /* match */
+                break;
+            }
+            if (!node) {
+                if (last_aug) {
+                    /* restore the correct augment target */
+                    node = last_aug->target;
+                    goto get_next_augment;
+                }
+                LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", type->info.lref.path);
+                return EXIT_FAILURE;
+            }
+
+            if (first_iter) {
+                /* set external dependency flag, we can decide based on the first found node */
+                if (op_node && parent_times &&
+                        resolve_schema_leafref_valid_dep_flag(op_node, node, (parent_times == -1 ? 1 : 0))) {
+                    parent->flags |= LYS_LEAFREF_DEP;
+                }
+                first_iter = 0;
+            }
+
+            if (has_predicate) {
+                /* we have predicate, so the current result must be list */
+                if (node->nodetype != LYS_LIST) {
+                    LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", type->info.lref.path);
+                    return -1;
+                }
+
+                i = resolve_schema_leafref_predicate(id, node, parent, op_node);
+                if (!i) {
+                    return EXIT_FAILURE;
+                } else if (i < 0) {
+                    return -1;
+                }
+                id += i;
+                has_predicate = 0;
+            }
+        } while (id[0]);
+
+        /* the target must be leaf or leaf-list (in YANG 1.1 only) */
+        if ((node->nodetype != LYS_LEAF) && (node->nodetype != LYS_LEAFLIST)) {
+            LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", type->info.lref.path);
+            LOGVAL(ctx, LYE_SPEC, LY_VLOG_PREV, NULL, "Leafref target \"%s\" is not a leaf nor a leaf-list.", type->info.lref.path);
+            return -1;
         }
-    } while (id[0]);
 
-    /* the target must be leaf or leaf-list (in YANG 1.1 only) */
-    if ((node->nodetype != LYS_LEAF) && (node->nodetype != LYS_LEAFLIST)) {
-        LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, parent, "leafref", path);
-        LOGVAL(ctx, LYE_SPEC, LY_VLOG_PREV, NULL, "Leafref target \"%s\" is not a leaf nor a leaf-list.", path);
-        return -1;
+        /* check status */
+        if (lyp_check_status(parent->flags, parent->module, parent->name,
+                        node->flags, node->module, node->name, node)) {
+            return -1;
+        }
+
+        /* assign */
+        type->info.lref.target = (struct lys_node_leaf *)node;
     }
 
-    /* check status */
-    if (lyp_check_status(parent->flags, parent->module, parent->name,
-                     node->flags, node->module, node->name, node)) {
-        return -1;
+    /* as the last thing traverse this leafref and make targets on the path implemented */
+    if (lys_node_module(parent)->implemented) {
+        /* make all the modules in the path implemented */
+        for (node = (struct lys_node *)type->info.lref.target; node; node = lys_parent(node)) {
+            if (!lys_node_module(node)->implemented) {
+                lys_node_module(node)->implemented = 1;
+                if (unres_schema_add_node(lys_node_module(node), unres, NULL, UNRES_MOD_IMPLEMENT, NULL) == -1) {
+                    return -1;
+                }
+            }
+        }
+
+        /* store the backlink from leafref target */
+        if (lys_leaf_add_leafref_target(type->info.lref.target, (struct lys_node *)type->parent)) {
+            return -1;
+        }
     }
 
-    if (ret) {
-        *ret = node;
-    }
-
-    return EXIT_SUCCESS;
+    /* check if leafref and its target are under common if-features */
+    return check_leafref_features(type);
 }
 
 /**
@@ -4198,7 +4341,7 @@ repeat:
         sleaf = sleaf->type.info.lref.target;
         goto repeat;
     } else {
-        if (!lyp_parse_value(&sleaf->type, &leaf.value_str, NULL, &leaf, NULL, NULL, 0, 0)) {
+        if (!lyp_parse_value(&sleaf->type, &leaf.value_str, NULL, &leaf, NULL, NULL, 0, 0, 0)) {
             ret = -1;
             goto finish;
         }
@@ -4551,6 +4694,16 @@ resolve_augment(struct lys_node_augment *aug, struct lys_node *uses, struct unre
         }
         aug->target = set->set.s[0];
         ly_set_free(set);
+    }
+
+    /* make this module implemented if the target module is (if the target is in an unimplemented module,
+     * it is fine because when we will be making that module implemented, its augment will be applied
+     * and that augment target module made implemented, recursively) */
+    if (mod->implemented && !lys_node_module(aug->target)->implemented) {
+        lys_node_module(aug->target)->implemented = 1;
+        if (unres_schema_add_node(lys_node_module(aug->target), unres, NULL, UNRES_MOD_IMPLEMENT, NULL) == -1) {
+            return -1;
+        }
     }
 
     /* check for mandatory nodes - if the target node is in another module
@@ -5610,10 +5763,10 @@ resolve_identref(struct lys_type *type, const char *ident_name, struct lyd_node 
     int need_implemented = 0;
     unsigned int i, j;
     struct lys_ident *der, *cur;
-    struct lys_module *imod = NULL, *m;
+    struct lys_module *imod = NULL, *m, *tmod;
     struct ly_ctx *ctx;
 
-    assert(type && ident_name && node && mod);
+    assert(type && ident_name && mod);
     ctx = mod->ctx;
 
     if (!type || (!type->info.ident.count && !type->der) || !ident_name) {
@@ -5622,10 +5775,10 @@ resolve_identref(struct lys_type *type, const char *ident_name, struct lyd_node 
 
     rc = parse_node_identifier(ident_name, &mod_name, &mod_name_len, &name, &nam_len, NULL, 0);
     if (rc < 1) {
-        LOGVAL(ctx, LYE_INCHAR, LY_VLOG_LYD, node, ident_name[-rc], &ident_name[-rc]);
+        LOGVAL(ctx, LYE_INCHAR, node ? LY_VLOG_LYD : LY_VLOG_NONE, node, ident_name[-rc], &ident_name[-rc]);
         return NULL;
     } else if (rc < (signed)strlen(ident_name)) {
-        LOGVAL(ctx, LYE_INCHAR, LY_VLOG_LYD, node, ident_name[rc], &ident_name[rc]);
+        LOGVAL(ctx, LYE_INCHAR, node ? LY_VLOG_LYD : LY_VLOG_NONE, node, ident_name[rc], &ident_name[rc]);
         return NULL;
     }
 
@@ -5640,6 +5793,17 @@ resolve_identref(struct lys_type *type, const char *ident_name, struct lyd_node 
             if (!strncmp(mod_name, mod->imp[i].module->name, mod_name_len) && !mod->imp[i].module->name[mod_name_len]) {
                 imod = mod->imp[i].module;
                 break;
+            }
+        }
+
+        /* We may need to pull it from the module that the typedef came from */
+        if (!imod && type && type->der) {
+            tmod = type->der->module;
+            for (i = 0; i < tmod->imp_size; i++) {
+                if (!strncmp(mod_name, tmod->imp[i].module->name, mod_name_len) && !tmod->imp[i].module->name[mod_name_len]) {
+                    imod = tmod->imp[i].module;
+                    break;
+                }
             }
         }
     } else {
@@ -5722,7 +5886,7 @@ resolve_identref(struct lys_type *type, const char *ident_name, struct lyd_node 
                 type = &type->der->type;
             }
             /* matching base not found */
-            LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYD, node, "Identity used as identityref value is not implemented.");
+            LOGVAL(ctx, LYE_SPEC, node ? LY_VLOG_LYD : LY_VLOG_NONE, node, "Identity used as identityref value is not implemented.");
             goto fail;
         }
     }
@@ -5748,26 +5912,29 @@ resolve_identref(struct lys_type *type, const char *ident_name, struct lyd_node 
     }
 
 fail:
-    LOGVAL(ctx, LYE_INRESOLV, LY_VLOG_LYD, node, "identityref", ident_name);
+    LOGVAL(ctx, LYE_INRESOLV, node ? LY_VLOG_LYD : LY_VLOG_NONE, node, "identityref", ident_name);
     return NULL;
 
 match:
     for (i = 0; i < cur->iffeature_size; i++) {
         if (!resolve_iffeature(&cur->iffeature[i])) {
-            LOGVAL(ctx, LYE_INVAL, LY_VLOG_LYD, node, cur->name, node->schema->name);
+            if (node) {
+                LOGVAL(ctx, LYE_INVAL, LY_VLOG_LYD, node, cur->name, node->schema->name);
+            }
             LOGVAL(ctx, LYE_SPEC, LY_VLOG_PREV, NULL, "Identity \"%s\" is disabled by its if-feature condition.", cur->name);
             return NULL;
         }
     }
     if (need_implemented) {
         if (dflt) {
-            /* try to make the module implemented */
+            /* later try to make the module implemented */
             LOGVRB("Making \"%s\" module implemented because of identityref default value \"%s\" used in the implemented \"%s\" module",
                    imod->name, cur->name, mod->name);
+            /* to be more effective we should use UNRES_MOD_IMPLEMENT but that would require changing prototype of
+             * several functions with little gain */
             if (lys_set_implemented(imod)) {
                 LOGERR(ctx, ly_errno, "Setting the module \"%s\" implemented because of used default identity \"%s\" failed.",
                        imod->name, cur->name);
-                LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYD, node, "Identity used as identityref value is not implemented.");
                 goto fail;
             }
         } else {
@@ -5800,6 +5967,10 @@ resolve_unres_schema_uses(struct lys_node_uses *uses, struct unres_schema *unres
      *       unresolved uses. The grouping cannot be used unless this counter is decreased back to 0. To remember
      *       that the uses already increased grouping's counter, the LYS_USESGRP flag is used. */
     for (par_grp = lys_parent((struct lys_node *)uses); par_grp && (par_grp->nodetype != LYS_GROUPING); par_grp = lys_parent(par_grp));
+    if (par_grp && ly_strequal(par_grp->name, uses->name, 1)) {
+        LOGVAL(ctx, LYE_INRESOLV, LY_VLOG_LYS, uses, "uses", uses->name);
+        return -1;
+    }
 
     if (!uses->grp) {
         rc = resolve_uses_schema_nodeid(uses->name, (const struct lys_node *)uses, (const struct lys_node_grp **)&uses->grp);
@@ -5833,6 +6004,7 @@ resolve_unres_schema_uses(struct lys_node_uses *uses, struct unres_schema *unres
             /* instantiate grouping only when it is completely resolved */
             uses->grp = NULL;
         }
+        LOGVAL(ctx, LYE_INRESOLV, LY_VLOG_LYS, uses, "uses", uses->name);
         return EXIT_FAILURE;
     }
 
@@ -5892,11 +6064,6 @@ resolve_list_keys(struct lys_node_list *list, const char *keys_str)
             len = strlen(keys_str);
         }
 
-        if (list->keys[i]) {
-            /* skip already resolved keys */
-            goto next;
-        }
-
         rc = lys_getnext_data(lys_node_module((struct lys_node *)list), (struct lys_node *)list, keys_str, len, LYS_LEAF,
                               (const struct lys_node **)&list->keys[i]);
         if (rc) {
@@ -5929,7 +6096,6 @@ resolve_list_keys(struct lys_node_list *list, const char *keys_str)
             free(s);
         }
 
-next:
         /* prepare for next iteration */
         while (value && isspace(value[0])) {
             value++;
@@ -6556,113 +6722,6 @@ cleanup:
 }
 
 static int
-check_leafref_features(struct lys_type *type)
-{
-    struct lys_node *iter;
-    struct ly_set *src_parents, *trg_parents, *features;
-    struct lys_node_augment *aug;
-    struct ly_ctx *ctx = ((struct lys_tpdf *)type->parent)->module->ctx;
-    unsigned int i, j, size, x;
-    int ret = EXIT_SUCCESS;
-
-    assert(type->parent);
-
-    src_parents = ly_set_new();
-    trg_parents = ly_set_new();
-    features = ly_set_new();
-
-    /* get parents chain of source (leafref) */
-    for (iter = (struct lys_node *)type->parent; iter; iter = lys_parent(iter)) {
-        if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
-            continue;
-        }
-        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT)) {
-            aug = (struct lys_node_augment *)iter->parent;
-            if ((aug->module->implemented && (aug->flags & LYS_NOTAPPLIED)) || !aug->target) {
-                /* unresolved augment, wait until it's resolved */
-                LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, aug,
-                       "Cannot check leafref \"%s\" if-feature consistency because of an unresolved augment.", type->info.lref.path);
-                ret = EXIT_FAILURE;
-                goto cleanup;
-            }
-        }
-        ly_set_add(src_parents, iter, LY_SET_OPT_USEASLIST);
-    }
-    /* get parents chain of target */
-    for (iter = (struct lys_node *)type->info.lref.target; iter; iter = lys_parent(iter)) {
-        if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
-            continue;
-        }
-        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT)) {
-            aug = (struct lys_node_augment *)iter->parent;
-            if ((aug->module->implemented && (aug->flags & LYS_NOTAPPLIED)) || !aug->target) {
-                /* unresolved augment, wait until it's resolved */
-                LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, aug,
-                       "Cannot check leafref \"%s\" if-feature consistency because of an unresolved augment.", type->info.lref.path);
-                ret = EXIT_FAILURE;
-                goto cleanup;
-            }
-        }
-        ly_set_add(trg_parents, iter, LY_SET_OPT_USEASLIST);
-    }
-
-    /* compare the features used in if-feature statements in the rest of both
-     * chains of parents. The set of features used for target must be a subset
-     * of features used for the leafref. This is not a perfect, we should compare
-     * the truth tables but it could require too much resources, so we simplify that */
-    for (i = 0; i < src_parents->number; i++) {
-        iter = src_parents->set.s[i]; /* shortcut */
-        if (!iter->iffeature_size) {
-            continue;
-        }
-        for (j = 0; j < iter->iffeature_size; j++) {
-            resolve_iffeature_getsizes(&iter->iffeature[j], NULL, &size);
-            for (; size; size--) {
-                if (!iter->iffeature[j].features[size - 1]) {
-                    /* not yet resolved feature, postpone this check */
-                    ret = EXIT_FAILURE;
-                    goto cleanup;
-                }
-                ly_set_add(features, iter->iffeature[j].features[size - 1], 0);
-            }
-        }
-    }
-    x = features->number;
-    for (i = 0; i < trg_parents->number; i++) {
-        iter = trg_parents->set.s[i]; /* shortcut */
-        if (!iter->iffeature_size) {
-            continue;
-        }
-        for (j = 0; j < iter->iffeature_size; j++) {
-            resolve_iffeature_getsizes(&iter->iffeature[j], NULL, &size);
-            for (; size; size--) {
-                if (!iter->iffeature[j].features[size - 1]) {
-                    /* not yet resolved feature, postpone this check */
-                    ret = EXIT_FAILURE;
-                    goto cleanup;
-                }
-                if ((unsigned)ly_set_add(features, iter->iffeature[j].features[size - 1], 0) >= x) {
-                    /* the feature is not present in features set of target's parents chain */
-                    LOGVAL(ctx, LYE_NORESOLV, LY_VLOG_LYS, type->parent, "leafref", type->info.lref.path);
-                    LOGVAL(ctx, LYE_SPEC, LY_VLOG_PREV, NULL,
-                           "Leafref is not conditional based on \"%s\" feature as its target.",
-                           iter->iffeature[j].features[size - 1]->name);
-                    ret = -1;
-                    goto cleanup;
-                }
-            }
-        }
-    }
-
-cleanup:
-    ly_set_free(features);
-    ly_set_free(src_parents);
-    ly_set_free(trg_parents);
-
-    return ret;
-}
-
-static int
 check_type_union_leafref(struct lys_type *type)
 {
     uint8_t i;
@@ -6746,35 +6805,7 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
         node = str_snode;
         stype = item;
 
-        rc = resolve_schema_leafref(stype->info.lref.path, node, (const struct lys_node **)&stype->info.lref.target);
-        if (!rc) {
-            assert(stype->info.lref.target);
-
-            if (lys_node_module(node)->implemented) {
-                /* make all the modules in the path implemented */
-                for (next = (struct lys_node *)stype->info.lref.target; next; next = lys_parent(next)) {
-                    if (!lys_node_module(next)->implemented) {
-                        if (lys_set_implemented(lys_node_module(next))) {
-                            rc = -1;
-                            break;
-                        }
-                    }
-                }
-                if (next) {
-                    break;
-                }
-
-                /* store the backlink from leafref target */
-                if (lys_leaf_add_leafref_target(stype->info.lref.target, (struct lys_node *)stype->parent)) {
-                    rc = -1;
-                    break;
-                }
-            }
-
-            /* check if leafref and its target are under common if-features */
-            rc = check_leafref_features(stype);
-        }
-
+        rc = resolve_schema_leafref(stype, node, unres);
         break;
     case UNRES_TYPE_DER_EXT:
         parent_type++;
@@ -6830,7 +6861,7 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
                     return -1;
                 }
             }
-        } else if (rc == EXIT_FAILURE && !(stype->flags & LYTYPE_GRP)) {
+        } else if (rc == EXIT_FAILURE && !(stype->value_flags & LY_VALUE_UNRESGRP)) {
             /* forward reference - in case the type is in grouping, we have to make the grouping unusable
              * by uses statement until the type is resolved. We do that the same way as uses statements inside
              * grouping. The grouping cannot be used unless the unres counter is 0.
@@ -6842,7 +6873,7 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
                     LOGERR(ctx, LY_EINT, "Too many unresolved items (type) inside a grouping.");
                     return -1;
                 }
-                stype->flags |= LYTYPE_GRP;
+                stype->value_flags |= LY_VALUE_UNRESGRP;
             }
         }
         break;
@@ -6946,6 +6977,9 @@ featurecheckdone:
     case UNRES_XPATH:
         node = (struct lys_node *)item;
         rc = check_xpath(node, 1);
+        break;
+    case UNRES_MOD_IMPLEMENT:
+        rc = lys_make_implemented_r(mod, unres);
         break;
     case UNRES_EXT:
         ext_data = (struct unres_ext *)str_snode;
@@ -7169,6 +7203,84 @@ print_unres_schema_item_fail(void *item, enum UNRES_ITEM type, void *str_node)
     }
 }
 
+static int
+resolve_unres_schema_types(struct unres_schema *unres, enum UNRES_ITEM types, struct ly_ctx *ctx, int forward_ref,
+                           int print_all_errors, uint32_t *resolved)
+{
+    uint32_t i, unres_count, res_count;
+    int ret = 0, rc;
+    struct ly_err_item *prev_eitem;
+    enum int_log_opts prev_ilo;
+    LY_ERR prev_ly_errno;
+
+    /* if there can be no forward references, every failure is final, so we can print it directly */
+    if (forward_ref) {
+        prev_ly_errno = ly_errno;
+        ly_ilo_change(ctx, ILO_STORE, &prev_ilo, &prev_eitem);
+    }
+
+    do {
+        unres_count = 0;
+        res_count = 0;
+
+        for (i = 0; i < unres->count; ++i) {
+            /* UNRES_TYPE_LEAFREF must be resolved (for storing leafref target pointers);
+             * if-features are resolved here to make sure that we will have all if-features for
+             * later check of feature circular dependency */
+            if (unres->type[i] & types) {
+                ++unres_count;
+                rc = resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
+                if (unres->type[i] == UNRES_EXT_FINALIZE) {
+                    /* to avoid double free */
+                    unres->type[i] = UNRES_RESOLVED;
+                }
+                if (!rc || (unres->type[i] == UNRES_XPATH)) {
+                    /* invalid XPath can never cause an error, only a warning */
+                    if (unres->type[i] == UNRES_LIST_UNIQ) {
+                        /* free the allocated structure */
+                        free(unres->item[i]);
+                    }
+
+                    unres->type[i] = UNRES_RESOLVED;
+                    ++(*resolved);
+                    ++res_count;
+                } else if ((rc == EXIT_FAILURE) && forward_ref) {
+                    /* forward reference, erase errors */
+                    ly_err_free_next(ctx, prev_eitem);
+                } else if (print_all_errors) {
+                    /* just so that we quit the loop */
+                    ++res_count;
+                    ret = -1;
+                } else {
+                    ly_ilo_restore(ctx, prev_ilo, prev_eitem, 1);
+                    return -1;
+                }
+            }
+        }
+    } while (res_count && (res_count < unres_count));
+
+    if (res_count < unres_count) {
+        assert(forward_ref);
+        /* just print the errors (but we must free the ones we have and get them again :-/ ) */
+        ly_ilo_restore(ctx, prev_ilo, prev_eitem, 0);
+
+        for (i = 0; i < unres->count; ++i) {
+            if (unres->type[i] & types) {
+                resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
+            }
+        }
+        return -1;
+    }
+
+    if (forward_ref) {
+        /* restore log */
+        ly_ilo_restore(ctx, prev_ilo, prev_eitem, 0);
+        ly_errno = prev_ly_errno;
+    }
+
+    return ret;
+}
+
 /**
  * @brief Resolve every unres schema item in the structure. Logs directly.
  *
@@ -7180,132 +7292,35 @@ print_unres_schema_item_fail(void *item, enum UNRES_ITEM type, void *str_node)
 int
 resolve_unres_schema(struct lys_module *mod, struct unres_schema *unres)
 {
-    uint32_t i, resolved = 0, unres_count, res_count;
-    struct ly_err_item *prev_eitem;
-    enum int_log_opts prev_ilo;
-    LY_ERR prev_ly_errno;
-    int rc;
+    uint32_t resolved = 0;
 
     assert(unres);
 
     LOGVRB("Resolving \"%s\" unresolved schema nodes and their constraints...", mod->name);
-    prev_ly_errno = ly_errno;
-    ly_ilo_change(mod->ctx, ILO_STORE, &prev_ilo, &prev_eitem);
 
-    /* uses */
-    do {
-        unres_count = 0;
-        res_count = 0;
-
-        for (i = 0; i < unres->count; ++i) {
-            /* UNRES_TYPE_LEAFREF must be resolved (for storing leafref target pointers);
-             * if-features are resolved here to make sure that we will have all if-features for
-             * later check of feature circular dependency */
-            if (unres->type[i] > UNRES_IDENT) {
-                continue;
-            }
-            /* processes UNRES_USES, UNRES_IFFEAT, UNRES_TYPE_DER, UNRES_TYPE_DER_TPDF, UNRES_TYPE_LEAFREF,
-             * UNRES_AUGMENT, UNRES_CHOICE_DFLT and UNRES_IDENT */
-
-            ++unres_count;
-            rc = resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
-            if (!rc) {
-                unres->type[i] = UNRES_RESOLVED;
-                ++resolved;
-                ++res_count;
-            } else if (rc == -1) {
-                goto error;
-            } else {
-                /* forward reference, erase errors */
-                ly_err_free_next(mod->ctx, prev_eitem);
-            }
-        }
-    } while (res_count && (res_count < unres_count));
-
-    if (res_count < unres_count) {
-        /* just print the errors (but we must free the ones we have and get them again :-/ ) */
-        ly_ilo_restore(mod->ctx, prev_ilo, prev_eitem, 0);
-
-        for (i = 0; i < unres->count; ++i) {
-            if (unres->type[i] > UNRES_IDENT) {
-                continue;
-            }
-            resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
-        }
+    /* UNRES_TYPE_LEAFREF must be resolved (for storing leafref target pointers);
+     * if-features are resolved here to make sure that we will have all if-features for
+     * later check of feature circular dependency */
+    if (resolve_unres_schema_types(unres, UNRES_USES | UNRES_IFFEAT | UNRES_TYPE_DER | UNRES_TYPE_DER_TPDF | UNRES_TYPE_DER_TPDF
+                                   | UNRES_TYPE_LEAFREF | UNRES_MOD_IMPLEMENT | UNRES_AUGMENT | UNRES_CHOICE_DFLT | UNRES_IDENT,
+                                   mod->ctx, 1, 0, &resolved)) {
         return -1;
     }
 
-    /* the rest except finalizing extensions and xpath */
-    for (i = 0; i < unres->count; ++i) {
-        if ((unres->type[i] == UNRES_RESOLVED) || (unres->type[i] == UNRES_EXT_FINALIZE) || (unres->type[i] == UNRES_XPATH)) {
-            continue;
-        }
-
-        rc = resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
-        if (rc == 0) {
-            if (unres->type[i] == UNRES_LIST_UNIQ) {
-                /* free the allocated structure */
-                free(unres->item[i]);
-            }
-            unres->type[i] = UNRES_RESOLVED;
-            ++resolved;
-        } else if (rc == -1) {
-            goto error;
-        } else {
-            /* forward reference, erase errors */
-            ly_err_free_next(mod->ctx, prev_eitem);
-        }
+    /* another batch of resolved items */
+    if (resolve_unres_schema_types(unres, UNRES_TYPE_IDENTREF | UNRES_FEATURE | UNRES_TYPEDEF_DFLT | UNRES_TYPE_DFLT
+                                   | UNRES_LIST_KEYS | UNRES_LIST_UNIQ | UNRES_EXT, mod->ctx, 1, 0, &resolved)) {
+        return -1;
     }
 
-    /* log normally now */
-    ly_ilo_restore(mod->ctx, prev_ilo, prev_eitem, 0);
-    ly_errno = prev_ly_errno;
-
-    /* finalize extensions, keep it last to provide the complete schema tree information to the plugin's checkers */
-    for (i = 0; i < unres->count; ++i) {
-        if (unres->type[i] != UNRES_EXT_FINALIZE) {
-            continue;
-        }
-
-        rc = resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
-        unres->type[i] = UNRES_RESOLVED;
-        if (rc == 0) {
-            ++resolved;
-        }
-        /* else error - it was already printed, but resolved was not increased,
-           so this unres item will not be resolved again in the following code,
-           but it will cause returning -1 at the end, this way we are able to
-           print all the issues with unres */
-    }
-
-    if (resolved < unres->count) {
-        /* try to resolve the unresolved nodes again, it will not resolve anything, but it will print
-         * all the validation errors, xpath is resolved only here to properly print all the messages
-         */
-        for (i = 0; i < unres->count; ++i) {
-            if (unres->type[i] == UNRES_RESOLVED) {
-                continue;
-            }
-            resolve_unres_schema_item(unres->module[i], unres->item[i], unres->type[i], unres->str_snode[i], unres);
-            if (unres->type[i] == UNRES_XPATH) {
-                /* XPath referencing an unknown node is actually supposed to be just a warning */
-                unres->type[i] = UNRES_RESOLVED;
-                resolved++;
-            }
-        }
-        if (resolved < unres->count) {
-            return -1;
-        }
+    /* print xpath warnings and finalize extensions, keep it last to provide the complete schema tree information to the plugin's checkers */
+    if (resolve_unres_schema_types(unres, UNRES_XPATH | UNRES_EXT_FINALIZE, mod->ctx, 0, 1, &resolved)) {
+        return -1;
     }
 
     LOGVRB("All \"%s\" schema nodes and constraints resolved.", mod->name);
     unres->count = 0;
     return EXIT_SUCCESS;
-
-error:
-    ly_ilo_restore(mod->ctx, prev_ilo, prev_eitem, 1);
-    /* ly_errno will be set accordingly, we do not want to keep the previous value */
-    return -1;
 }
 
 /**
@@ -7358,8 +7373,8 @@ unres_schema_add_node(struct lys_module *mod, struct unres_schema *unres, void *
     struct lyxml_elem *yin;
     struct ly_ctx *ctx = mod->ctx;
 
-    assert(unres && item && ((type != UNRES_LEAFREF) && (type != UNRES_INSTID) && (type != UNRES_WHEN)
-           && (type != UNRES_MUST)));
+    assert(unres && (item || (type == UNRES_MOD_IMPLEMENT)) && ((type != UNRES_LEAFREF) && (type != UNRES_INSTID)
+           && (type != UNRES_WHEN) && (type != UNRES_MUST)));
 
     /* check for duplicities in unres */
     for (u = 0; u < unres->count; u++) {
@@ -7372,9 +7387,11 @@ unres_schema_add_node(struct lys_module *mod, struct unres_schema *unres, void *
         }
     }
 
-    if ((type == UNRES_EXT_FINALIZE) || (type == UNRES_XPATH)) {
+    if ((type == UNRES_EXT_FINALIZE) || (type == UNRES_XPATH) || (type == UNRES_MOD_IMPLEMENT)) {
         /* extension finalization is not even tried when adding the item into the inres list,
-         * xpath is not tried because it would hide some potential warnings */
+         * xpath is not tried because it would hide some potential warnings,
+         * implementing module must be deferred because some other nodes can be added that will need to be traversed
+         * and their targets made implemented */
         rc = EXIT_FAILURE;
     } else {
         prev_ly_errno = ly_errno;
@@ -7799,32 +7816,34 @@ error:
 static int
 resolve_leafref(struct lyd_node_leaf_list *leaf, const char *path, int req_inst, struct lyd_node **ret)
 {
-    struct ly_set *set;
+    struct lyxp_set xp_set;
     uint32_t i;
 
+    memset(&xp_set, 0, sizeof xp_set);
     *ret = NULL;
 
     /* syntax was already checked, so just evaluate the path using standard XPath */
-    set = lyd_find_path((struct lyd_node *)leaf, path);
-    if (!set) {
+    if (lyxp_eval(path, (struct lyd_node *)leaf, LYXP_NODE_ELEM, lyd_node_module((struct lyd_node *)leaf), &xp_set, 0) != EXIT_SUCCESS) {
         return -1;
     }
 
-    for (i = 0; i < set->number; ++i) {
-        if (!(set->set.d[i]->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST))) {
-            continue;
-        }
+    if (xp_set.type == LYXP_SET_NODE_SET) {
+        for (i = 0; i < xp_set.used; ++i) {
+            if ((xp_set.val.nodes[i].type != LYXP_NODE_ELEM) || !(xp_set.val.nodes[i].node->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST))) {
+                continue;
+            }
 
-        /* not that the value is already in canonical form since the parsers does the conversion,
-         * so we can simply compare just the values */
-        if (ly_strequal(leaf->value_str, ((struct lyd_node_leaf_list *)set->set.d[i])->value_str, 1)) {
-            /* we have the match */
-            *ret = set->set.d[i];
-            break;
+            /* not that the value is already in canonical form since the parsers does the conversion,
+             * so we can simply compare just the values */
+            if (ly_strequal(leaf->value_str, ((struct lyd_node_leaf_list *)xp_set.val.nodes[i].node)->value_str, 1)) {
+                /* we have the match */
+                *ret = xp_set.val.nodes[i].node;
+                break;
+            }
         }
     }
 
-    ly_set_free(set);
+    lyxp_set_cast(&xp_set, LYXP_SET_EMPTY, (struct lyd_node *)leaf, NULL, 0);
 
     if (!*ret) {
         /* reference not found */
@@ -7853,7 +7872,7 @@ resolve_union(struct lyd_node_leaf_list *leaf, struct lys_type *type, int store,
 
     assert(type->base == LY_TYPE_UNION);
 
-    if ((leaf->value_type == LY_TYPE_UNION) || ((leaf->value_type == LY_TYPE_INST) && (leaf->value_flags & LYTYPE_UNRES))) {
+    if ((leaf->value_type == LY_TYPE_UNION) || ((leaf->value_type == LY_TYPE_INST) && (leaf->value_flags & LY_VALUE_UNRES))) {
         /* either NULL or instid previously converted to JSON */
         json_val = lydict_insert(ctx, leaf->value.string, 0);
     }
@@ -7888,7 +7907,7 @@ resolve_union(struct lyd_node_leaf_list *leaf, struct lys_type *type, int store,
                     } else {
                         /* valid unresolved */
                         ly_ilo_restore(NULL, prev_ilo, NULL, 0);
-                        if (!lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0)) {
+                        if (!lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0, 0)) {
                             return -1;
                         }
                         ly_ilo_change(NULL, ILO_IGNORE, &prev_ilo, NULL);
@@ -7928,7 +7947,7 @@ resolve_union(struct lyd_node_leaf_list *leaf, struct lys_type *type, int store,
                             leaf->value.instance = NULL;
                         }
                         leaf->value_type = LY_TYPE_INST;
-                        leaf->value_flags |= LYTYPE_UNRES;
+                        leaf->value_flags |= LY_VALUE_UNRES;
                     }
                 }
 
@@ -7936,7 +7955,7 @@ resolve_union(struct lyd_node_leaf_list *leaf, struct lys_type *type, int store,
             }
             break;
         default:
-            if (lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, NULL, store, 0)) {
+            if (lyp_parse_value(t, &leaf->value_str, NULL, leaf, NULL, NULL, store, 0, 0)) {
                 success = 1;
             }
             break;
@@ -8019,11 +8038,11 @@ resolve_unres_data_item(struct lyd_node *node, enum UNRES_ITEM type, int ignore_
                 }
                 leaf->value.leafref = ret;
                 leaf->value_type = LY_TYPE_LEAFREF;
-                leaf->value_flags &= ~LYTYPE_UNRES;
+                leaf->value_flags &= ~LY_VALUE_UNRES;
             } else {
                 /* valid unresolved */
-                if (!(leaf->value_flags & LYTYPE_UNRES)) {
-                    if (!lyp_parse_value(&sleaf->type, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0)) {
+                if (!(leaf->value_flags & LY_VALUE_UNRES)) {
+                    if (!lyp_parse_value(&sleaf->type, &leaf->value_str, NULL, leaf, NULL, NULL, 1, 0, 0)) {
                         return -1;
                     }
                 }
@@ -8052,12 +8071,12 @@ resolve_unres_data_item(struct lyd_node *node, enum UNRES_ITEM type, int ignore_
                 /* valid resolved */
                 leaf->value.instance = ret;
                 leaf->value_type = LY_TYPE_INST;
-                leaf->value_flags &= ~LYTYPE_UNRES;
+                leaf->value_flags &= ~LY_VALUE_UNRES;
             } else {
                 /* valid unresolved */
                 leaf->value.instance = NULL;
                 leaf->value_type = LY_TYPE_INST;
-                leaf->value_flags |= LYTYPE_UNRES;
+                leaf->value_flags |= LY_VALUE_UNRES;
             }
         } else {
             return rc;
