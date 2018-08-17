@@ -331,13 +331,25 @@ ly_ctx_unset_option(struct ly_ctx *ctx, int options)
 API void
 ly_ctx_set_disable_searchdirs(struct ly_ctx *ctx)
 {
-    ly_ctx_set_option(ctx, LY_CTX_DISABLE_SEARCHIDRS);
+    ly_ctx_set_option(ctx, LY_CTX_DISABLE_SEARCHDIRS);
 }
 
 API void
 ly_ctx_unset_disable_searchdirs(struct ly_ctx *ctx)
 {
-    ly_ctx_unset_option(ctx, LY_CTX_DISABLE_SEARCHIDRS);
+    ly_ctx_unset_option(ctx, LY_CTX_DISABLE_SEARCHDIRS);
+}
+
+API void
+ly_ctx_set_disable_searchdir_cwd(struct ly_ctx *ctx)
+{
+    ly_ctx_set_option(ctx, LY_CTX_DISABLE_SEARCHDIR_CWD);
+}
+
+API void
+ly_ctx_unset_disable_searchdir_cwd(struct ly_ctx *ctx)
+{
+    ly_ctx_unset_option(ctx, LY_CTX_DISABLE_SEARCHDIR_CWD);
 }
 
 API void
@@ -365,9 +377,15 @@ ly_ctx_unset_trusted(struct ly_ctx *ctx)
 }
 
 API int
+ly_ctx_get_options(struct ly_ctx *ctx)
+{
+    return ctx->models.flags;
+}
+
+API int
 ly_ctx_set_searchdir(struct ly_ctx *ctx, const char *search_dir)
 {
-    char *new = NULL;
+    char *new_dir = NULL;
     int index = 0;
     void *r;
     int rc = EXIT_FAILURE;
@@ -384,7 +402,8 @@ ly_ctx_set_searchdir(struct ly_ctx *ctx, const char *search_dir)
             return EXIT_FAILURE;
         }
 
-        new = realpath(search_dir, NULL);
+        new_dir = realpath(search_dir, NULL);
+        LY_CHECK_ERR_GOTO(!new_dir, LOGERR(ctx, LY_ESYS, "realpath() call failed (%s).", strerror(errno)), cleanup);
         if (!ctx->models.search_paths) {
             ctx->models.search_paths = malloc(2 * sizeof *ctx->models.search_paths);
             LY_CHECK_ERR_GOTO(!ctx->models.search_paths, LOGMEM(ctx), cleanup);
@@ -392,7 +411,7 @@ ly_ctx_set_searchdir(struct ly_ctx *ctx, const char *search_dir)
         } else {
             for (index = 0; ctx->models.search_paths[index]; index++) {
                 /* check for duplicities */
-                if (!strcmp(new, ctx->models.search_paths[index])) {
+                if (!strcmp(new_dir, ctx->models.search_paths[index])) {
                     /* path is already present */
                     goto success;
                 }
@@ -401,8 +420,8 @@ ly_ctx_set_searchdir(struct ly_ctx *ctx, const char *search_dir)
             LY_CHECK_ERR_GOTO(!r, LOGMEM(ctx), cleanup);
             ctx->models.search_paths = r;
         }
-        ctx->models.search_paths[index] = new;
-        new = NULL;
+        ctx->models.search_paths[index] = new_dir;
+        new_dir = NULL;
         ctx->models.search_paths[index + 1] = NULL;
 
 success:
@@ -413,7 +432,7 @@ success:
     }
 
 cleanup:
-    free(new);
+    free(new_dir);
     return rc;
 }
 
@@ -766,7 +785,8 @@ ly_ctx_load_localfile(struct ly_ctx *ctx, struct lys_module *module, const char 
     LYS_INFORMAT format;
     struct lys_module *result = NULL;
 
-    if (lys_search_localfile(ly_ctx_get_searchdirs(ctx), name, revision, &filepath, &format)) {
+    if (lys_search_localfile(ly_ctx_get_searchdirs(ctx), !(ctx->models.flags & LY_CTX_DISABLE_SEARCHDIR_CWD), name, revision,
+                             &filepath, &format)) {
         goto cleanup;
     } else if (!filepath) {
         if (!module && !revision) {
@@ -860,7 +880,7 @@ const struct lys_module *
 ly_ctx_load_sub_module(struct ly_ctx *ctx, struct lys_module *module, const char *name, const char *revision,
                        int implement, struct unres_schema *unres)
 {
-    struct lys_module *mod;
+    struct lys_module *mod = NULL;
     char *module_data = NULL;
     int i;
     void (*module_data_free)(void *module_data) = NULL;
@@ -936,7 +956,7 @@ ly_ctx_load_sub_module(struct ly_ctx *ctx, struct lys_module *module, const char
         if (module_data_free) {
             module_data_free(module_data);
         }
-    } else if (!(ctx->models.flags & LY_CTX_DISABLE_SEARCHIDRS)) {
+    } else if (!(ctx->models.flags & LY_CTX_DISABLE_SEARCHDIRS)) {
         /* module was not received from the callback or there is no callback set */
         mod = ly_ctx_load_localfile(ctx, module, name, revision, implement, unres);
     }

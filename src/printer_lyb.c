@@ -143,8 +143,8 @@ lyb_check_augments(struct lys_node *parent, struct hash_table *ht, int options)
                 iter && (iter->nodetype & (LYS_USES | LYS_CASE | LYS_CHOICE));
                 iter = lys_parent(iter));
 
-            if (((options & LYD_OPT_RPC) && (iter->nodetype == LYS_OUTPUT))
-                || ((options & LYD_OPT_RPCREPLY) && (iter->nodetype == LYS_INPUT))) {
+            if (iter && (((options & LYD_OPT_RPC) && (iter->nodetype == LYS_OUTPUT))
+                || ((options & LYD_OPT_RPCREPLY) && (iter->nodetype == LYS_INPUT)))) {
                 /* skip unused nodes */
                 continue;
             }
@@ -220,8 +220,8 @@ lyb_hash_siblings(struct lys_node *sibling, const struct lys_module **models, in
                  iter && (iter->nodetype & (LYS_USES | LYS_CASE | LYS_CHOICE));
                  iter = lys_parent(iter));
 
-            if (((options & LYD_OPT_RPC) && (iter->nodetype == LYS_OUTPUT))
-                    || ((options & LYD_OPT_RPCREPLY) && (iter->nodetype == LYS_INPUT))) {
+            if (iter && (((options & LYD_OPT_RPC) && (iter->nodetype == LYS_OUTPUT))
+                    || ((options & LYD_OPT_RPCREPLY) && (iter->nodetype == LYS_INPUT)))) {
                 /* skip unused nodes */
                 continue;
             }
@@ -655,34 +655,33 @@ lyb_print_anydata(struct lyd_node_anydata *anydata, struct lyout *out, struct ly
     char *buf;
     LYD_ANYDATA_VALUETYPE type;
 
-    switch (anydata->value_type) {
-    case LYD_ANYDATA_XML:
+    if (anydata->value_type == LYD_ANYDATA_XML) {
         /* transform XML into CONSTSTRING */
         lyxml_print_mem(&buf, anydata->value.xml, LYXML_PRINT_SIBLINGS);
         lyxml_free(anydata->schema->module->ctx, anydata->value.xml);
 
         anydata->value_type = LYD_ANYDATA_CONSTSTRING;
         anydata->value.str = lydict_insert_zc(anydata->schema->module->ctx, buf);
-        /* fallthrough */
-    case LYD_ANYDATA_DATATREE:
-    case LYD_ANYDATA_JSON:
-    case LYD_ANYDATA_SXML:
-    case LYD_ANYDATA_CONSTSTRING:
-    case LYD_ANYDATA_LYB:
-        type = anydata->value_type;
-        break;
-    default:
+    }
+
+    if (anydata->value_type == LYD_ANYDATA_DATATREE) {
+        /* that is the format used */
+        type = LYD_ANYDATA_LYB;
+    } else if (anydata->value_type & LYD_ANYDATA_STRING) {
+        /* dynamic value, only used for input */
         LOGERR(anydata->schema->module->ctx, LY_EINT, "Unsupported anydata value type to print.");
         return -1;
+    } else {
+        type = anydata->value_type;
     }
 
     /* first byte is type */
     ret += lyb_write(out, (uint8_t *)&type, sizeof type, lybs);
 
     /* followed by the content */
-    if (type == LYD_ANYDATA_DATATREE) {
+    if (anydata->value_type == LYD_ANYDATA_DATATREE) {
         ret += lyb_print_data(out, anydata->value.tree, 0);
-    } else if (type == LYD_ANYDATA_LYB) {
+    } else if (anydata->value_type == LYD_ANYDATA_LYB) {
         len = lyd_lyb_data_length(anydata->value.mem);
         if (len > -1) {
             ret += lyb_write_string(anydata->value.str, (size_t)len, 0, out, lybs);
@@ -877,6 +876,9 @@ lyb_print_attributes(struct lyout *out, struct lyd_attr *attr, struct lyb_state 
 
         /* get the type */
         type = *(struct lys_type **)lys_ext_complex_get_substmt(LY_STMT_TYPE, attr->annotation, NULL);
+        if (!type) {
+            return -1;
+        }
 
         /* attribute value */
         ret += (r = lyb_print_value(type, attr->value_str, attr->value, attr->value_type, attr->value_flags, 0, out, lybs));
@@ -923,8 +925,8 @@ check_inout:
                  iter && (iter->nodetype & (LYS_USES | LYS_CASE | LYS_CHOICE));
                  iter = lys_parent(iter));
 
-            if (((options & LYD_OPT_RPC) && (iter->nodetype == LYS_OUTPUT))
-                    || ((options & LYD_OPT_RPCREPLY) && (iter->nodetype == LYS_INPUT))) {
+            if (iter && (((options & LYD_OPT_RPC) && (iter->nodetype == LYS_OUTPUT))
+                    || ((options & LYD_OPT_RPCREPLY) && (iter->nodetype == LYS_INPUT)))) {
                 first_sibling = (struct lys_node *)lys_getnext(first_sibling, NULL, NULL, 0);
                 goto check_inout;
             }
@@ -1007,11 +1009,13 @@ lyb_print_subtree(struct lyout *out, const struct lyd_node *node, struct hash_ta
             sparent && (sparent->nodetype & (LYS_USES | LYS_CASE | LYS_CHOICE));
             sparent = lys_parent(sparent));
 
-        if ((options & LYD_OPT_RPC) && (sparent->nodetype == LYS_OUTPUT)) {
-            return 0;
-        }
-        if ((options & LYD_OPT_RPCREPLY) && (sparent->nodetype == LYS_INPUT)) {
-            return 0;
+        if (sparent) {
+            if ((options & LYD_OPT_RPC) && (sparent->nodetype == LYS_OUTPUT)) {
+                return 0;
+            }
+            if ((options & LYD_OPT_RPCREPLY) && (sparent->nodetype == LYS_INPUT)) {
+                return 0;
+            }
         }
     }
 
