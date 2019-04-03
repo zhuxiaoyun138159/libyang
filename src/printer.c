@@ -3,7 +3,7 @@
  * @author Radek Krejci <rkrejci@cesnet.cz>
  * @brief Wrapper for all libyang printers.
  *
- * Copyright (c) 2015 CESNET, z.s.p.o.
+ * Copyright (c) 2015 - 2018 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -13,10 +13,13 @@
  */
 
 #define _GNU_SOURCE /* vasprintf(), vdprintf() */
+#define _POSIX_C_SOURCE 200809L
+
 #include <sys/types.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -401,6 +404,29 @@ lys_print_file(FILE *f, const struct lys_module *module, LYS_OUTFORMAT format, c
 }
 
 API int
+lys_print_path(const char *path, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
+               int line_length, int options)
+{
+    FILE *f;
+    int ret;
+
+    if (!path || !module) {
+        LOGARG;
+        return EXIT_FAILURE;
+    }
+
+    f = fopen(path, "w");
+    if (!f) {
+        LOGERR(module->ctx, LY_ESYS, "Failed to open file \"%s\" (%s).", path, strerror(errno));
+        return EXIT_FAILURE;
+    }
+
+    ret = lys_print_file(f, module, format, target_node, line_length, options);
+    fclose(f);
+    return ret;
+}
+
+API int
 lys_print_fd(int fd, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
              int line_length, int options)
 {
@@ -680,14 +706,6 @@ lys_print_target(struct lyout *out, const struct lys_module *module, const char 
 static int
 lyd_print_(struct lyout *out, const struct lyd_node *root, LYD_FORMAT format, int options)
 {
-    if (!root) {
-        /* no data to print, but even empty tree is valid */
-        if (out->type == LYOUT_MEMORY || out->type == LYOUT_CALLBACK) {
-            ly_print(out, "");
-        }
-        return EXIT_SUCCESS;
-    }
-
     switch (format) {
     case LYD_XML:
         return xml_print_data(out, root, options);
@@ -721,6 +739,29 @@ lyd_print_file(FILE *f, const struct lyd_node *root, LYD_FORMAT format, int opti
 
     free(out.buffered);
     return r;
+}
+
+API int
+lyd_print_path(const char *path, const struct lyd_node *root, LYD_FORMAT format, int options)
+{
+    FILE *f;
+    int ret;
+
+    if (!path) {
+        LOGARG;
+        return EXIT_FAILURE;
+    }
+
+    f = fopen(path, "w");
+    if (!f) {
+        LOGERR(root->schema->module->ctx, LY_EINVAL, "Cannot open file \"%s\" for writing.", path);
+        return EXIT_FAILURE;
+    }
+
+    ret = lyd_print_file(f, root, format, options);
+
+    fclose(f);
+    return ret;
 }
 
 API int

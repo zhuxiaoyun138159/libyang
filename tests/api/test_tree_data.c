@@ -804,7 +804,7 @@ static void
 test_lyd_insert_after(void **state)
 {
     (void) state; /* unused */
-    struct lyd_node *new = NULL;
+    struct lyd_node *new = NULL, *node;
     struct lyd_node_leaf_list *result;
     int rc;
 
@@ -833,6 +833,36 @@ test_lyd_insert_after(void **state)
 
     result = (struct lyd_node_leaf_list *) root->child->next->next;
     assert_string_equal("1000", result->value_str);
+
+    /* test user-ordered lists */
+    lyd_free_withsiblings(root->child);
+    rc = lyd_validate(&root, LYD_OPT_CONFIG, NULL);
+    assert_int_equal(rc, 0);
+
+    new = lyd_new(NULL, lyd_node_module(root), "l");
+    assert_non_null(new);
+    node = lyd_new_leaf(new, NULL, "key1", "1");
+    assert_non_null(node);
+    node = lyd_new_leaf(new, NULL, "key2", "1");
+    assert_non_null(node);
+    node = lyd_new_leaf(new, NULL, "value", "one");
+    assert_non_null(node);
+    rc = lyd_insert_after(root->prev, new);
+    assert_int_equal(rc, 0);
+
+    new = lyd_new(NULL, lyd_node_module(root), "l");
+    assert_non_null(new);
+    node = lyd_new_leaf(new, NULL, "key1", "2");
+    assert_non_null(node);
+    node = lyd_new_leaf(new, NULL, "key2", "2");
+    assert_non_null(node);
+    node = lyd_new_leaf(new, NULL, "value", "two");
+    assert_non_null(node);
+    rc = lyd_insert_after(root->prev, new);
+    assert_int_equal(rc, 0);
+
+    rc = lyd_insert_after(root->next, root->next->next);
+    assert_int_equal(rc, 0);
 }
 
 static void
@@ -1573,24 +1603,164 @@ test_lyd_leaf_type(void **state)
 }
 
 static void
-test_lyd_validation_remove_empty_containers(void **state)
+test_lyd_validation_dflt_empty_containers(void **state)
 {
     (void) state; /* unused */
     struct lyd_node *new = NULL;
     struct lyd_node *old = root;
     struct lyd_node *node = root;
-    struct lyd_node_leaf_list *result;
 
     new = lyd_new(NULL, old->schema->module, "z");
     lyd_insert_before(old, new);
     node = new;
 
     assert_int_equal(lyd_validate(&node, LYD_OPT_CONFIG, ctx), 0);
-    assert_ptr_not_equal(node, NULL);
-    assert_ptr_equal(node, old);
-    assert_ptr_not_equal(node->child, NULL);
-    result = (struct lyd_node_leaf_list *) node->child;
-    assert_string_equal("test", result->value_str);
+    assert_ptr_equal(node->dflt, 1);
+}
+
+void
+test_lyd_diff(void **state)
+{
+    (void) state;
+    struct lyd_node *first = root;
+    struct lyd_node *second = root;
+    struct lyd_difflist *difflist = NULL;
+
+    /* Check whether the trees are equal */
+    if (lyd_diff(first, second, LYD_DIFFOPT_NOSIBLINGS)) {
+        fail();
+    }
+
+    second = lyd_new(NULL, root->schema->module, "z");
+
+    if (!second) {
+        fail();
+    }
+
+    difflist = lyd_diff(first, second, LYD_DIFFOPT_NOSIBLINGS);
+
+    lyd_free_withsiblings(second);
+
+    /* Checking whether the trees are different */
+    if (difflist) {
+        fail();
+    }
+
+    lyd_free_diff(difflist);
+}
+
+void
+test_lyd_free_diff(void **state)
+{
+    (void) state;
+    struct lyd_node *first = NULL;
+    struct lyd_node *second = NULL;
+    struct lyd_difflist *difflist;
+
+    first = lyd_dup(root->child, 0);
+
+    difflist = lyd_diff(first, second, LYD_DIFFOPT_NOSIBLINGS);
+
+    /* Check if there are any differences in trees */
+    if (!difflist) {
+        fail();
+    }
+
+    /* Freeing list and nodes */
+    lyd_free_diff(difflist);
+    lyd_free(first);
+    lyd_free(second);
+}
+
+void
+test_lyd_new_output(void **state)
+{
+    (void) state;
+    struct lyd_node *node = NULL;
+
+    node = lyd_new_output(NULL, root->schema->module, "rpc1");
+
+    /* Checking if node is assigned */
+    if (!node) {
+        fail();
+    }
+
+    lyd_free(node);
+}
+
+void
+test_lyd_list_pos(void **state)
+{
+    (void) state;
+    struct lyd_node *node = NULL;
+    unsigned int pos;
+
+    node = lyd_new_output(NULL, root->schema->module, "rpc1");
+    pos = lyd_list_pos(node);
+
+    /* Checking if the position has been assigned */
+    if (pos) {
+        fail();
+    }
+}
+
+void
+test_lyd_dup_withsiblings(void **state)
+{
+    (void) state;
+    struct lyd_node *node = NULL;
+    struct lyd_node *new_node = NULL;
+
+    node = lyd_new_output(NULL, root->schema->module, "rpc1");
+
+    /* Check if the sibling of our node exists  */
+    if (!node->prev) {
+        fail();
+    }
+
+    new_node = lyd_dup_withsiblings(node, 0);
+
+    /* Check if the sibling of our duplicated node exists */
+    if (!new_node->prev) {
+        fail();
+    }
+
+    /* Freeing nodes */
+    lyd_free(node);
+    lyd_free(new_node);
+}
+
+void
+test_lyd_dup_to_ctx(void **state)
+{
+    (void) state;
+    struct ly_ctx *new_ctx = NULL;
+    struct lyd_node *node = NULL;
+    struct lyd_node *new_node = NULL;
+    char *yang_folder = TESTS_DIR "/api/files";
+
+    new_ctx = ly_ctx_new(yang_folder, 0);
+    lys_parse_mem(new_ctx, lys_module_a, LYS_IN_YIN);
+
+    node = lyd_new_path(NULL, ctx, "/a:top/bar-sub2", NULL, 0, 0);
+
+    /* Check if the node exist */
+    if (!node) {
+        fail();
+    }
+
+    new_node = lyd_dup_to_ctx(node, 0, new_ctx);
+
+    /* Check if the node has been successfully duplicated to context */
+    if (!node) {
+        fail();
+    }
+
+    /* Freeing up memory */
+    lyd_free(node);
+    lyd_free(new_node);
+    ly_ctx_clean(new_ctx, NULL);
+    ly_ctx_destroy(new_ctx, NULL);
 }
 
 int main(void)
@@ -1633,7 +1803,12 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_lyd_print_clb_json, setup_f, teardown_f),
         cmocka_unit_test_setup_teardown(test_lyd_path, setup_f, teardown_f),
         cmocka_unit_test_setup_teardown(test_lyd_leaf_type, setup_f2, teardown_f2),
-        cmocka_unit_test_setup_teardown(test_lyd_validation_remove_empty_containers, setup_f, teardown_f),
+        cmocka_unit_test_setup_teardown(test_lyd_validation_dflt_empty_containers, setup_f, teardown_f),
+        cmocka_unit_test_setup_teardown(test_lyd_diff, setup_f, teardown_f),
+        cmocka_unit_test_setup_teardown(test_lyd_free_diff, setup_f, teardown_f),
+        cmocka_unit_test_setup_teardown(test_lyd_new_output, setup_f, teardown_f),
+        cmocka_unit_test_setup_teardown(test_lyd_dup_withsiblings, setup_f, teardown_f),
+        cmocka_unit_test_setup_teardown(test_lyd_dup_to_ctx, setup_f, teardown_f),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

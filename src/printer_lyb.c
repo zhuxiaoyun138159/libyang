@@ -18,6 +18,32 @@
 #include <string.h>
 #include <assert.h>
 #include <stdint.h>
+#ifdef __APPLE__
+# include <libkern/OSByteOrder.h>
+# define htole64(x) OSSwapHostToLittleInt64(x)
+#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+# include <sys/endian.h>
+#elif defined(__sun__)
+# include <endian.h>
+# include <sys/byteorder.h>
+# if defined(_BIG_ENDIAN)
+#  define le16toh(x) BSWAP_16(x)
+#  define le32toh(x) BSWAP_32(x)
+#  define le64toh(x) BSWAP_64(x)
+#  define htole64(x) le64toh(x)
+#  define htole32(x) le32toh(x)
+#  define htole16(x) le16toh(x)
+# else
+#  define le16toh(x) (x)
+#  define le32toh(x) (x)
+#  define le64toh(x) (x)
+#  define htole64(x) (x)
+#  define htole32(x) (x)
+#  define htole16(x) (x)
+# endif
+#else
+# include <endian.h>
+#endif
 
 #include "common.h"
 #include "printer.h"
@@ -82,6 +108,7 @@ lyb_hash_sequence_check(struct hash_table *ht, struct lys_node *sibling, int ht_
 }
 
 #ifndef NDEBUG
+
 static int
 lyb_check_augment_collision(struct hash_table *ht, struct lys_node *aug1, struct lys_node *aug2)
 {
@@ -107,7 +134,7 @@ lyb_check_augment_collision(struct hash_table *ht, struct lys_node *aug1, struct
                     if ((lyht_find(ht, &iter1, hash1, NULL) == 0) || (lyht_find(ht, &iter2, hash2, NULL) == 0)) {
                         LOGWRN(aug1->module->ctx, "Augmentations from modules \"%s\" and \"%s\" have fatal hash collision.",
                                iter1->module->name, iter2->module->name);
-                        LOGWRN(aug1->module->ctx, "Load module \"%s\" before \"%s\" to resolve this issue.",
+                        LOGWRN(aug1->module->ctx, "It will cause no errors if module \"%s\" is always loaded before \"%s\".",
                                iter1->module->name, iter2->module->name);
                         lyht_set_cb(ht, cb);
                         return 1;
@@ -186,6 +213,7 @@ lyb_check_augments(struct lys_node *parent, struct hash_table *ht, int options)
     free(augs);
     return;
 }
+
 #endif
 
 static struct hash_table *
@@ -209,7 +237,8 @@ lyb_hash_siblings(struct lys_node *sibling, const struct lys_module **models, in
     mod = lys_node_module(sibling);
 
     sibling = NULL;
-    while ((sibling = (struct lys_node *)lys_getnext(sibling, parent, mod, 0))) {
+    /* ignore features so that their state does not affect hashes */
+    while ((sibling = (struct lys_node *)lys_getnext(sibling, parent, mod, LYS_GETNEXT_NOSTATECHECK))) {
         if (models && !lyb_has_schema_model(sibling, models, mod_count)) {
             /* ignore models not present during printing */
             continue;
@@ -235,6 +264,7 @@ lyb_hash_siblings(struct lys_node *sibling, const struct lys_module **models, in
             aug_mod = lys_node_module(sibling);
         }
 #endif
+
         /* find the first non-colliding hash (or specifically non-colliding hash sequence) */
         for (i = 0; i < LYB_HASH_BITS; ++i) {
             /* check that we are not colliding with nodes inserted with a lower collision ID than ours */
@@ -321,14 +351,13 @@ lyb_hash_find(struct hash_table *ht, struct lys_node *node)
 static int
 lyb_write(struct lyout *out, const uint8_t *buf, size_t count, struct lyb_state *lybs)
 {
-    int ret, i, full_chunk_i;
+    int ret = 0, i, full_chunk_i;
     size_t r, to_write;
-    LYB_META meta;
+    uint8_t meta_buf[LYB_META_BYTES];
 
     assert(out && lybs);
 
-    ret = 0;
-    while (count) {
+    while (1) {
         /* check for full data chunks */
         to_write = count;
         full_chunk_i = -1;
@@ -341,28 +370,35 @@ lyb_write(struct lyout *out, const uint8_t *buf, size_t count, struct lyb_state 
             }
         }
 
-        r = ly_write(out, (char *)buf, to_write);
-        if (r < to_write) {
-            return -1;
+        if ((full_chunk_i == -1) && !count) {
+            break;
         }
 
-        for (i = 0; i < lybs->used; ++i) {
-            /* increase all written counters */
-            lybs->written[i] += r;
-            assert(lybs->written[i] <= LYB_SIZE_MAX);
-        }
-        /* decrease count/buf */
-        count -= r;
-        buf += r;
+        /* we are actually writing some data, not just finishing another chunk */
+        if (to_write) {
+            r = ly_write(out, (char *)buf, to_write);
+            if (r < to_write) {
+                return -1;
+            }
 
-        ret += r;
+            for (i = 0; i < lybs->used; ++i) {
+                /* increase all written counters */
+                lybs->written[i] += r;
+                assert(lybs->written[i] <= LYB_SIZE_MAX);
+            }
+            /* decrease count/buf */
+            count -= r;
+            buf += r;
+
+            ret += r;
+        }
 
         if (full_chunk_i > -1) {
             /* write the meta information (inner chunk count and chunk size) */
-            memcpy(&meta, &lybs->written[full_chunk_i], LYB_SIZE_BYTES);
-            memcpy(((uint8_t *)&meta) + LYB_SIZE_BYTES, &lybs->inner_chunks[full_chunk_i], LYB_INCHUNK_BYTES);
+            meta_buf[0] = lybs->written[full_chunk_i] & 0xFF;
+            meta_buf[1] = lybs->inner_chunks[full_chunk_i] & 0xFF;
 
-            r = ly_write_skipped(out, lybs->position[full_chunk_i], (char *)&meta, LYB_META_BYTES);
+            r = ly_write_skipped(out, lybs->position[full_chunk_i], (char *)meta_buf, LYB_META_BYTES);
             if (r < LYB_META_BYTES) {
                 return -1;
             }
@@ -382,7 +418,7 @@ lyb_write(struct lyout *out, const uint8_t *buf, size_t count, struct lyb_state 
             /* increase inner chunk count */
             for (i = 0; i < full_chunk_i; ++i) {
                 if (lybs->inner_chunks[i] == LYB_INCHUNK_MAX) {
-                    LOGINT(NULL);
+                    LOGINT(lybs->ctx);
                     return -1;
                 }
                 ++lybs->inner_chunks[i];
@@ -397,13 +433,13 @@ static int
 lyb_write_stop_subtree(struct lyout *out, struct lyb_state *lybs)
 {
     int r;
-    LYB_META meta;
+    uint8_t meta_buf[LYB_META_BYTES];
 
     /* write the meta chunk information */
-    memcpy(&meta, &lybs->written[lybs->used - 1], LYB_SIZE_BYTES);
-    memcpy(((uint8_t *)&meta) + LYB_SIZE_BYTES, &lybs->inner_chunks[lybs->used - 1], LYB_INCHUNK_BYTES);
+    meta_buf[0] = lybs->written[lybs->used - 1] & 0xFF;
+    meta_buf[1] = lybs->inner_chunks[lybs->used - 1] & 0xFF;
 
-    r = ly_write_skipped(out, lybs->position[lybs->used - 1], (char *)&meta, LYB_META_BYTES);
+    r = ly_write_skipped(out, lybs->position[lybs->used - 1], (char *)&meta_buf, LYB_META_BYTES);
     if (r < LYB_META_BYTES) {
         return -1;
     }
@@ -422,7 +458,7 @@ lyb_write_start_subtree(struct lyout *out, struct lyb_state *lybs)
         lybs->written = ly_realloc(lybs->written, lybs->size * sizeof *lybs->written);
         lybs->position = ly_realloc(lybs->position, lybs->size * sizeof *lybs->position);
         lybs->inner_chunks = ly_realloc(lybs->inner_chunks, lybs->size * sizeof *lybs->inner_chunks);
-        LY_CHECK_ERR_RETURN(!lybs->written || !lybs->position || !lybs->inner_chunks, LOGMEM(NULL), -1);
+        LY_CHECK_ERR_RETURN(!lybs->written || !lybs->position || !lybs->inner_chunks, LOGMEM(lybs->ctx), -1);
     }
 
     ++lybs->used;
@@ -432,7 +468,7 @@ lyb_write_start_subtree(struct lyout *out, struct lyb_state *lybs)
     /* another inner chunk */
     for (i = 0; i < lybs->used - 1; ++i) {
         if (lybs->inner_chunks[i] == LYB_INCHUNK_MAX) {
-            LOGINT(NULL);
+            LOGINT(lybs->ctx);
             return -1;
         }
         ++lybs->inner_chunks[i];
@@ -448,9 +484,13 @@ lyb_write_number(uint64_t num, size_t bytes, struct lyout *out, struct lyb_state
     size_t i;
     uint8_t byte;
 
+    num = htole64(num);
     for (i = 0; i < bytes; ++i) {
         byte = *(((uint8_t *)&num) + i);
         ret += lyb_write(out, &byte, 1, lybs);
+        if (ret < 0) {
+            break;
+        }
     }
 
     return ret;
@@ -461,11 +501,11 @@ lyb_write_enum(uint32_t enum_idx, uint32_t count, struct lyout *out, struct lyb_
 {
     size_t bytes;
 
-    if (count < (2 << 8)) {
+    if (count < (1 << 8)) {
         bytes = 1;
-    } else if (count < (2 << 16)) {
+    } else if (count < (1 << 16)) {
         bytes = 2;
-    } else if (count < (2 << 24)) {
+    } else if (count < (1 << 24)) {
         bytes = 3;
     } else {
         bytes = 4;
@@ -483,13 +523,13 @@ lyb_write_string(const char *str, size_t str_len, int with_length, struct lyout 
         str_len = strlen(str);
     }
     if (str_len > UINT16_MAX) {
-        LOGINT(NULL);
+        LOGINT(lybs->ctx);
         return -1;
     }
 
     if (with_length) {
         /* print length on 2 bytes */
-        ret += (r = lyb_write(out, (uint8_t *)&str_len, 2, lybs));
+        ret += (r = lyb_write_number(str_len, 2, out, lybs));
         if (r < 0) {
             return -1;
         }
@@ -534,8 +574,7 @@ lyb_print_model(struct lyout *out, const struct lys_module *mod, struct lyb_stat
 
         revision |= r;
     }
-
-    ret += (r = lyb_write(out, (uint8_t *)&revision, sizeof revision, lybs));
+    ret += (r = lyb_write_number(revision, sizeof revision, out, lybs));
     if (r < 0) {
         return -1;
     }
@@ -584,48 +623,50 @@ lyb_print_data_models(struct lyout *out, const struct lyd_node *root, struct lyb
         add_model(&models, &mod_count, mod);
     }
 
-    /* then add all models augmenting or deviating the used models */
-    idx = ly_ctx_internal_modules_count(root->schema->module->ctx);
-    while ((mod = ly_ctx_get_module_iter(root->schema->module->ctx, &idx))) {
-        if (!mod->implemented) {
+    if (root) {
+        /* then add all models augmenting or deviating the used models */
+        idx = ly_ctx_internal_modules_count(root->schema->module->ctx);
+        while ((mod = ly_ctx_get_module_iter(root->schema->module->ctx, &idx))) {
+            if (!mod->implemented) {
 next_mod:
-            continue;
-        }
-
-        for (i = 0; i < mod->deviation_size; ++i) {
-            if (mod->deviation[i].orig_node && is_added_model(models, mod_count, lys_node_module(mod->deviation[i].orig_node))) {
-                add_model(&models, &mod_count, mod);
-                goto next_mod;
+                continue;
             }
-        }
-        for (i = 0; i < mod->augment_size; ++i) {
-            if (is_added_model(models, mod_count, lys_node_module(mod->augment[i].target))) {
-                add_model(&models, &mod_count, mod);
-                goto next_mod;
-            }
-        }
 
-        /* submodules */
-        for (j = 0; j < mod->inc_size; ++j) {
-            submod = mod->inc[j].submodule;
-
-            for (i = 0; i < submod->deviation_size; ++i) {
-                if (submod->deviation[i].orig_node && is_added_model(models, mod_count, lys_node_module(submod->deviation[i].orig_node))) {
+            for (i = 0; i < mod->deviation_size; ++i) {
+                if (mod->deviation[i].orig_node && is_added_model(models, mod_count, lys_node_module(mod->deviation[i].orig_node))) {
                     add_model(&models, &mod_count, mod);
                     goto next_mod;
                 }
             }
-            for (i = 0; i < submod->augment_size; ++i) {
-                if (is_added_model(models, mod_count, lys_node_module(submod->augment[i].target))) {
+            for (i = 0; i < mod->augment_size; ++i) {
+                if (is_added_model(models, mod_count, lys_node_module(mod->augment[i].target))) {
                     add_model(&models, &mod_count, mod);
                     goto next_mod;
+                }
+            }
+
+            /* submodules */
+            for (j = 0; j < mod->inc_size; ++j) {
+                submod = mod->inc[j].submodule;
+
+                for (i = 0; i < submod->deviation_size; ++i) {
+                    if (submod->deviation[i].orig_node && is_added_model(models, mod_count, lys_node_module(submod->deviation[i].orig_node))) {
+                        add_model(&models, &mod_count, mod);
+                        goto next_mod;
+                    }
+                }
+                for (i = 0; i < submod->augment_size; ++i) {
+                    if (is_added_model(models, mod_count, lys_node_module(submod->augment[i].target))) {
+                        add_model(&models, &mod_count, mod);
+                        goto next_mod;
+                    }
                 }
             }
         }
     }
 
     /* now write module count on 2 bytes */
-    ret += lyb_write(out, (uint8_t *)&mod_count, 2, lybs);
+    ret += lyb_write_number(mod_count, 2, out, lybs);
 
     /* and all the used models */
     for (i = 0; i < mod_count; ++i) {
@@ -634,6 +675,19 @@ next_mod:
 
     free(models);
     return ret;
+}
+
+static int
+lyb_print_magic_number(struct lyout *out)
+{
+    uint32_t magic_number;
+
+    /* 'l', 'y', 'b' - 0x6c7962 */
+    ((char *)&magic_number)[0] = 'l';
+    ((char *)&magic_number)[1] = 'y';
+    ((char *)&magic_number)[2] = 'b';
+
+    return ly_write(out, (char *)&magic_number, 3);
 }
 
 static int
@@ -669,7 +723,7 @@ lyb_print_anydata(struct lyd_node_anydata *anydata, struct lyout *out, struct ly
         type = LYD_ANYDATA_LYB;
     } else if (anydata->value_type & LYD_ANYDATA_STRING) {
         /* dynamic value, only used for input */
-        LOGERR(anydata->schema->module->ctx, LY_EINT, "Unsupported anydata value type to print.");
+        LOGERR(lybs->ctx, LY_EINT, "Unsupported anydata value type to print.");
         return -1;
     } else {
         type = anydata->value_type;
@@ -769,9 +823,8 @@ lyb_print_value(const struct lys_type *type, const char *value_str, lyd_val valu
             /* will be a full byte */
             for (byte = 0, i = 0; i < 8; ++i) {
                 if (value.bit[bits_i + i]) {
-                    byte |= 0x80;
+                    byte |= (1 << i);
                 }
-                byte >>= 1;
             }
             ret += lyb_write(out, &byte, sizeof byte, lybs);
             bits_i += 8;
@@ -781,11 +834,9 @@ lyb_print_value(const struct lys_type *type, const char *value_str, lyd_val valu
         if (type->info.bits.count % 8) {
             for (byte = 0, i = 0; i < type->info.bits.count % 8; ++i) {
                 if (value.bit[bits_i + i]) {
-                    byte |= 0x80;
+                    byte |= (1 << i);
                 }
-                byte >>= 1;
             }
-            byte >>= 8 - (i + 1);
             ret += lyb_write(out, &byte, sizeof byte, lybs);
         }
         break;
@@ -843,7 +894,7 @@ lyb_print_attributes(struct lyout *out, struct lyd_attr *attr, struct lyb_state 
     /* count attributes */
     for (count = 0, iter = attr; iter; ++count, iter = iter->next) {
         if (count == UINT8_MAX) {
-            LOGERR(NULL, LY_EINT, "Maximum supported number of data node attributes is %u.", UINT8_MAX);
+            LOGERR(lybs->ctx, LY_EINT, "Maximum supported number of data node attributes is %u.", UINT8_MAX);
             return -1;
         }
     }
@@ -863,25 +914,25 @@ lyb_print_attributes(struct lyout *out, struct lyd_attr *attr, struct lyb_state 
         }
 
         /* model */
-        ret += (r = lyb_print_model(out, attr->annotation->module, lybs));
+        ret += (r = lyb_print_model(out, iter->annotation->module, lybs));
         if (r < 0) {
             return -1;
         }
 
         /* annotation name with length */
-        ret += (r = lyb_write_string(attr->annotation->arg_value, 0, 1, out, lybs));
+        ret += (r = lyb_write_string(iter->annotation->arg_value, 0, 1, out, lybs));
         if (r < 0) {
             return -1;
         }
 
         /* get the type */
-        type = (struct lys_type **)lys_ext_complex_get_substmt(LY_STMT_TYPE, attr->annotation, NULL);
+        type = (struct lys_type **)lys_ext_complex_get_substmt(LY_STMT_TYPE, iter->annotation, NULL);
         if (!type || !(*type)) {
             return -1;
         }
 
         /* attribute value */
-        ret += (r = lyb_print_value(*type, attr->value_str, attr->value, attr->value_type, attr->value_flags, 0, out, lybs));
+        ret += (r = lyb_print_value(*type, iter->value_str, iter->value, iter->value_type, iter->value_flags, 0, out, lybs));
         if (r < 0) {
             return -1;
         }
@@ -950,7 +1001,7 @@ check_inout:
             /* and save it */
             ++lybs->sib_ht_count;
             mem = realloc(lybs->sib_ht, lybs->sib_ht_count * sizeof *lybs->sib_ht);
-            LY_CHECK_ERR_RETURN(!mem, LOGMEM(schema->module->ctx), -1);
+            LY_CHECK_ERR_RETURN(!mem, LOGMEM(lybs->ctx), -1);
             lybs->sib_ht = mem;
 
             lybs->sib_ht[lybs->sib_ht_count - 1].first_sibling = first_sibling;
@@ -1105,9 +1156,27 @@ lyb_print_data(struct lyout *out, const struct lyd_node *root, int options)
     uint8_t zero = 0;
     struct hash_table *top_sibling_ht = NULL;
     const struct lys_module *prev_mod = NULL;
+    struct lys_node *parent;
     struct lyb_state lybs;
 
     memset(&lybs, 0, sizeof lybs);
+
+    if (root) {
+        lybs.ctx = lyd_node_module(root)->ctx;
+
+        for (parent = lys_parent(root->schema); parent && (parent->nodetype == LYS_USES); parent = lys_parent(parent));
+        if (parent && (parent->nodetype != LYS_EXT)) {
+            LOGERR(lybs.ctx, LY_EINVAL, "LYB printer supports only printing top-level nodes.");
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* LYB magic number */
+    ret += (r = lyb_print_magic_number(out));
+    if (r < 0) {
+        rc = EXIT_FAILURE;
+        goto finish;
+    }
 
     /* LYB header */
     ret += (r = lyb_print_header(out));

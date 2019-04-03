@@ -138,9 +138,9 @@ cleanup:
 static int
 lytype_load_plugin(void *dlhandler, const char *file_name)
 {
-    struct lytype_plugin_list *plugin, *p;
-    uint32_t u, v;
+    struct lytype_plugin_list *plugin;
     char *str;
+    int *version;
 
 #ifdef STATIC
     return 0;
@@ -153,6 +153,20 @@ lytype_load_plugin(void *dlhandler, const char *file_name)
         LOGERR(NULL, LY_ESYS, "Processing \"%s\" user type plugin failed, missing plugin list object (%s).", file_name, str);
         return 1;
     }
+    version = dlsym(dlhandler, "lytype_api_version");
+    if (dlerror() || *version != LYTYPE_API_VERSION) {
+        LOGWRN(NULL, "Processing \"%s\" user type plugin failed, wrong API version - %d expected, %d found.",
+               file_name, LYTYPE_API_VERSION, version ? *version : 0);
+        return 1;
+    }
+    return ly_register_types(plugin, file_name);
+}
+
+API int
+ly_register_types(struct lytype_plugin_list *plugin, const char *log_name)
+{
+    struct lytype_plugin_list *p;
+    uint32_t u, v;
 
     for (u = 0; plugin[u].name; u++) {
         /* check user type implementations for collisions */
@@ -162,7 +176,7 @@ lytype_load_plugin(void *dlhandler, const char *file_name)
                     (!plugin[u].revision || !type_plugins[v].revision || !strcmp(plugin[u].revision, type_plugins[v].revision))) {
                 LOGERR(NULL, LY_ESYS, "Processing \"%s\" extension plugin failed,"
                         "implementation collision for extension %s from module %s%s%s.",
-                        file_name, plugin[u].name, plugin[u].module, plugin[u].revision ? "@" : "",
+                        log_name, plugin[u].name, plugin[u].module, plugin[u].revision ? "@" : "",
                         plugin[u].revision ? plugin[u].revision : "");
                 return 1;
             }
@@ -187,10 +201,9 @@ lytype_load_plugin(void *dlhandler, const char *file_name)
 static int
 lyext_load_plugin(void *dlhandler, const char *file_name)
 {
-    struct lyext_plugin_list *plugin, *p;
-    struct lyext_plugin_complex *pluginc;
-    uint32_t u, v;
+    struct lyext_plugin_list *plugin;
     char *str;
+    int *version;
 
 #ifdef STATIC
     return 0;
@@ -203,6 +216,21 @@ lyext_load_plugin(void *dlhandler, const char *file_name)
         LOGERR(NULL, LY_ESYS, "Processing \"%s\" extension plugin failed, missing plugin list object (%s).", file_name, str);
         return 1;
     }
+    version = dlsym(dlhandler, "lyext_api_version");
+    if (dlerror() || *version != LYEXT_API_VERSION) {
+        LOGWRN(NULL, "Processing \"%s\" extension plugin failed, wrong API version - %d expected, %d found.",
+               file_name, LYEXT_API_VERSION, version ? *version : 0);
+        return 1;
+    }
+    return ly_register_exts(plugin, file_name);
+}
+
+API int
+ly_register_exts(struct lyext_plugin_list *plugin, const char *log_name)
+{
+    struct lyext_plugin_list *p;
+    struct lyext_plugin_complex *pluginc;
+    uint32_t u, v;
 
     for (u = 0; plugin[u].name; u++) {
         /* check extension implementations for collisions */
@@ -212,7 +240,7 @@ lyext_load_plugin(void *dlhandler, const char *file_name)
                     (!plugin[u].revision || !ext_plugins[v].revision || !strcmp(plugin[u].revision, ext_plugins[v].revision))) {
                 LOGERR(NULL, LY_ESYS, "Processing \"%s\" extension plugin failed,"
                         "implementation collision for extension %s from module %s%s%s.",
-                        file_name, plugin[u].name, plugin[u].module, plugin[u].revision ? "@" : "",
+                        log_name, plugin[u].name, plugin[u].module, plugin[u].revision ? "@" : "",
                         plugin[u].revision ? plugin[u].revision : "");
                 return 1;
             }
@@ -227,7 +255,7 @@ lyext_load_plugin(void *dlhandler, const char *file_name)
                         pluginc->substmt[v].stmt == LY_STMT_YINELEM) {
                     LOGERR(NULL, LY_EINVAL,
                             "Extension plugin \"%s\" (extension %s) allows not supported extension substatement (%s)",
-                            file_name, plugin[u].name, ly_stmt_str[pluginc->substmt[v].stmt]);
+                            log_name, plugin[u].name, ly_stmt_str[pluginc->substmt[v].stmt]);
                     return 1;
                 }
                 if (pluginc->substmt[v].cardinality > LY_STMT_CARD_MAND &&
@@ -235,7 +263,7 @@ lyext_load_plugin(void *dlhandler, const char *file_name)
                         pluginc->substmt[v].stmt <= LY_STMT_STATUS) {
                     LOGERR(NULL, LY_EINVAL, "Extension plugin \"%s\" (extension %s) allows multiple instances on \"%s\" "
                            "substatement, which is not supported.",
-                           file_name, plugin[u].name, ly_stmt_str[pluginc->substmt[v].stmt]);
+                           log_name, plugin[u].name, ly_stmt_str[pluginc->substmt[v].stmt]);
                     return 1;
                 }
             }
@@ -560,7 +588,7 @@ lytype_find(const char *module, const char *revision, const char *type_name)
 }
 
 int
-lytype_store(const struct lys_module *mod, const char *type_name, const char *value_str, lyd_val *value)
+lytype_store(const struct lys_module *mod, const char *type_name, const char **value_str, lyd_val *value)
 {
     struct lytype_plugin_list *p;
     char *err_msg = NULL;
@@ -569,9 +597,9 @@ lytype_store(const struct lys_module *mod, const char *type_name, const char *va
 
     p = lytype_find(mod->name, mod->rev_size ? mod->rev[0].date : NULL, type_name);
     if (p) {
-        if (p->store_clb(type_name, value_str, value, &err_msg)) {
+        if (p->store_clb(mod->ctx, type_name, value_str, value, &err_msg)) {
             if (!err_msg) {
-                if (asprintf(&err_msg, "Failed to store value \"%s\" of user type \"%s\".", value_str, type_name) == -1) {
+                if (asprintf(&err_msg, "Failed to store value \"%s\" of user type \"%s\".", *value_str, type_name) == -1) {
                     LOGMEM(mod->ctx);
                     return -1;
                 }
@@ -589,11 +617,40 @@ lytype_store(const struct lys_module *mod, const char *type_name, const char *va
 }
 
 void
-lytype_free(const struct lys_module *mod, const char *type_name, lyd_val value)
+lytype_free(const struct lys_type *type, lyd_val value, const char *value_str)
 {
     struct lytype_plugin_list *p;
+    struct lys_node_leaf sleaf;
+    struct lyd_node_leaf_list leaf;
+    struct lys_module *mod;
 
-    p = lytype_find(mod->name, mod->rev_size ? mod->rev[0].date : NULL, type_name);
+    assert(type->der && type->der->module);
+
+    mod = type->der->module;
+    memset(&sleaf, 0, sizeof sleaf);
+    memset(&leaf, 0, sizeof leaf);
+
+    if (type->base == LY_TYPE_UNION) {
+        /* create a fake schema node */
+        sleaf.module = mod;
+        sleaf.name = "fake-leaf";
+        sleaf.type = *type;
+        sleaf.nodetype = LYS_LEAF;
+
+        /* and a fake data node */
+        leaf.schema = (struct lys_node *)&sleaf;
+        leaf.value = value;
+        leaf.value_str = value_str;
+
+        /* find the original type */
+        type = lyd_leaf_type(&leaf);
+        if (!type) {
+            LOGINT(mod->ctx);
+            return;
+        }
+    }
+
+    p = lytype_find(mod->name, mod->rev_size ? mod->rev[0].date : NULL, type->der->name);
     if (!p) {
         LOGINT(mod->ctx);
         return;

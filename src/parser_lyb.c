@@ -16,6 +16,36 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
+#ifdef __APPLE__
+# include <libkern/OSByteOrder.h>
+
+# define le16toh(x) OSSwapLittleToHostInt16(x)
+# define le32toh(x) OSSwapLittleToHostInt32(x)
+# define le64toh(x) OSSwapLittleToHostInt64(x)
+#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+# include <sys/endian.h>
+#elif defined(__sun__)
+# include <endian.h>
+# include <sys/byteorder.h>
+# if defined(_BIG_ENDIAN)
+#  define le16toh(x) BSWAP_16(x)
+#  define le32toh(x) BSWAP_32(x)
+#  define le64toh(x) BSWAP_64(x)
+#  define htole64(x) le64toh(x)
+#  define htole32(x) le32toh(x)
+#  define htole16(x) le16toh(x)
+# else
+#  define le16toh(x) (x)
+#  define le32toh(x) (x)
+#  define le64toh(x) (x)
+#  define htole64(x) (x)
+#  define htole32(x) (x)
+#  define htole16(x) (x)
+# endif
+#else
+# include <endian.h>
+#endif
 
 #include "libyang.h"
 #include "common.h"
@@ -31,7 +61,7 @@ lyb_read(const char *data, uint8_t *buf, size_t count, struct lyb_state *lybs)
 {
     int ret = 0, i, empty_chunk_i;
     size_t to_read;
-    LYB_META meta;
+    uint8_t meta_buf[LYB_META_BYTES];
 
     assert(data && lybs);
 
@@ -75,12 +105,9 @@ lyb_read(const char *data, uint8_t *buf, size_t count, struct lyb_state *lybs)
 
         if (empty_chunk_i > -1) {
             /* read the next chunk meta information */
-            memcpy(&meta, data + ret, LYB_META_BYTES);
-            lybs->written[empty_chunk_i] = 0;
-            lybs->inner_chunks[empty_chunk_i] = 0;
-
-            memcpy(&lybs->written[empty_chunk_i], &meta, LYB_SIZE_BYTES);
-            memcpy(&lybs->inner_chunks[empty_chunk_i], ((uint8_t *)&meta) + LYB_SIZE_BYTES, LYB_INCHUNK_BYTES);
+            memcpy(meta_buf, data + ret, LYB_META_BYTES);
+            lybs->written[empty_chunk_i] = meta_buf[0];
+            lybs->inner_chunks[empty_chunk_i] = meta_buf[1];
 
             /* remember whether there is a following chunk or not */
             lybs->position[empty_chunk_i] = (lybs->written[empty_chunk_i] == LYB_SIZE_MAX ? 1 : 0);
@@ -112,19 +139,25 @@ lyb_read_number(uint64_t *num, size_t bytes, const char *data, struct lyb_state 
 static int
 lyb_read_enum(uint64_t *enum_idx, uint32_t count, const char *data, struct lyb_state *lybs)
 {
+    int ret = 0;
     size_t bytes;
+    uint64_t tmp_enum = 0;
 
-    if (count < (2 << 8)) {
+    if (count < (1 << 8)) {
         bytes = 1;
-    } else if (count < (2 << 16)) {
+    } else if (count < (1 << 16)) {
         bytes = 2;
-    } else if (count < (2 << 24)) {
+    } else if (count < (1 << 24)) {
         bytes = 3;
     } else {
         bytes = 4;
     }
 
-    return lyb_read_number(enum_idx, bytes, data, lybs);
+    /* The enum is always read into a uint64_t buffer */
+    ret = lyb_read_number(&tmp_enum, bytes, data, lybs);
+    *enum_idx = le64toh(tmp_enum);
+
+    return ret;
 }
 
 static int
@@ -132,10 +165,12 @@ lyb_read_string(const char *data, char **str, int with_length, struct lyb_state 
 {
     int next_chunk = 0, r, ret = 0;
     size_t len = 0, cur_len;
+    uint8_t len_buf[2];
 
     if (with_length) {
-        ret += (r = lyb_read(data, (uint8_t *)&len, 2, lybs));
+        ret += (r = lyb_read(data, len_buf, 2, lybs));
         LYB_HAVE_READ_GOTO(r, data, error);
+        len = len_buf[0] | (len_buf[1] << 8);
     } else {
         /* read until the end of this subtree */
         len = lybs->written[lybs->used - 1];
@@ -145,7 +180,7 @@ lyb_read_string(const char *data, char **str, int with_length, struct lyb_state 
     }
 
     *str = malloc((len + 1) * sizeof **str);
-    LY_CHECK_ERR_RETURN(!*str, LOGMEM(NULL), -1);
+    LY_CHECK_ERR_RETURN(!*str, LOGMEM(lybs->ctx), -1);
 
     ret += (r = lyb_read(data, (uint8_t *)*str, len, lybs));
     LYB_HAVE_READ_GOTO(r, data, error);
@@ -159,7 +194,7 @@ lyb_read_string(const char *data, char **str, int with_length, struct lyb_state 
         }
 
         *str = ly_realloc(*str, (len + cur_len + 1) * sizeof **str);
-        LY_CHECK_ERR_RETURN(!*str, LOGMEM(NULL), -1);
+        LY_CHECK_ERR_RETURN(!*str, LOGMEM(lybs->ctx), -1);
 
         ret += (r = lyb_read(data, ((uint8_t *)*str) + len, cur_len, lybs));
         LYB_HAVE_READ_GOTO(r, data, error);
@@ -180,7 +215,7 @@ static void
 lyb_read_stop_subtree(struct lyb_state *lybs)
 {
     if (lybs->written[lybs->used - 1]) {
-        LOGINT(NULL);
+        LOGINT(lybs->ctx);
     }
 
     --lybs->used;
@@ -189,56 +224,65 @@ lyb_read_stop_subtree(struct lyb_state *lybs)
 static int
 lyb_read_start_subtree(const char *data, struct lyb_state *lybs)
 {
-    LYB_META meta;
+    uint8_t meta_buf[LYB_META_BYTES];
 
     if (lybs->used == lybs->size) {
         lybs->size += LYB_STATE_STEP;
         lybs->written = ly_realloc(lybs->written, lybs->size * sizeof *lybs->written);
         lybs->position = ly_realloc(lybs->position, lybs->size * sizeof *lybs->position);
         lybs->inner_chunks = ly_realloc(lybs->inner_chunks, lybs->size * sizeof *lybs->inner_chunks);
-        LY_CHECK_ERR_RETURN(!lybs->written || !lybs->position || !lybs->inner_chunks, LOGMEM(NULL), -1);
+        LY_CHECK_ERR_RETURN(!lybs->written || !lybs->position || !lybs->inner_chunks, LOGMEM(lybs->ctx), -1);
     }
 
-    memcpy(&meta, data, LYB_META_BYTES);
+    memcpy(meta_buf, data, LYB_META_BYTES);
 
     ++lybs->used;
-    lybs->written[lybs->used - 1] = 0;
-    lybs->inner_chunks[lybs->used - 1] = 0;
-
-    memcpy(&lybs->written[lybs->used - 1], &meta, LYB_SIZE_BYTES);
-    memcpy(&lybs->inner_chunks[lybs->used - 1], ((uint8_t *)&meta) + LYB_SIZE_BYTES, LYB_INCHUNK_BYTES);
+    lybs->written[lybs->used - 1] = meta_buf[0];
+    lybs->inner_chunks[lybs->used - 1] = meta_buf[LYB_SIZE_BYTES];
     lybs->position[lybs->used - 1] = (lybs->written[lybs->used - 1] == LYB_SIZE_MAX ? 1 : 0);
 
     return LYB_META_BYTES;
 }
 
 static int
-lyb_parse_model(struct ly_ctx *ctx, const char *data, const struct lys_module **mod, struct lyb_state *lybs)
+lyb_parse_model(const char *data, const struct lys_module **mod, struct lyb_state *lybs)
 {
     int r, ret = 0;
     char *mod_name = NULL, mod_rev[11];
     uint16_t rev = 0;
+    uint8_t tmp_buf[2];
 
     /* model name */
     ret += (r = lyb_read_string(data, &mod_name, 1, lybs));
     LYB_HAVE_READ_GOTO(r, data, error);
 
     /* revision */
-    ret += (r = lyb_read(data, (uint8_t *)&rev, sizeof rev, lybs));
+    ret += (r = lyb_read(data, tmp_buf, sizeof tmp_buf, lybs));
     LYB_HAVE_READ_GOTO(r, data, error);
+    rev = tmp_buf[0] | (tmp_buf[1] << 8);
 
     if (rev) {
         sprintf(mod_rev, "%04u-%02u-%02u", ((rev & 0xFE00) >> 9) + 2000, (rev & 0x01E0) >> 5, (rev & 0x001F));
-        *mod = ly_ctx_get_module(ctx, mod_name, mod_rev, 0);
+        *mod = ly_ctx_get_module(lybs->ctx, mod_name, mod_rev, 0);
     } else {
-        *mod = ly_ctx_get_module(ctx, mod_name, NULL, 0);
+        *mod = ly_ctx_get_module(lybs->ctx, mod_name, NULL, 0);
     }
-    if (ctx->data_clb) {
+    if (lybs->ctx->data_clb) {
         if (!*mod) {
-            *mod = ctx->data_clb(ctx, mod_name, NULL, 0, ctx->data_clb_data);
+            *mod = lybs->ctx->data_clb(lybs->ctx, mod_name, NULL, 0, lybs->ctx->data_clb_data);
         } else if (!(*mod)->implemented) {
-            *mod = ctx->data_clb(ctx, mod_name, (*mod)->ns, LY_MODCLB_NOT_IMPLEMENTED, ctx->data_clb_data);
+            *mod = lybs->ctx->data_clb(lybs->ctx, mod_name, (*mod)->ns, LY_MODCLB_NOT_IMPLEMENTED, lybs->ctx->data_clb_data);
         }
+    }
+
+    if (!*mod) {
+        LOGERR(lybs->ctx, LY_EINVAL, "Invalid context for LYB data parsing, missing module \"%s%s%s\".",
+               mod_name, rev ? "@" : "", rev ? mod_rev : "");
+        goto error;
+    } else if (!(*mod)->implemented) {
+        LOGERR(lybs->ctx, LY_EINVAL, "Invalid context for LYB data parsing, module \"%s%s%s\" not implemented.",
+               mod_name, rev ? "@" : "", rev ? mod_rev : "");
+        goto error;
     }
 
     free(mod_name);
@@ -282,7 +326,8 @@ lyb_new_node(const struct lys_node *schema)
     /* fill basic info */
     node->schema = (struct lys_node *)schema;
     if (resolve_applies_when(schema, 0, NULL)) {
-        node->when_status = LYD_WHEN;
+        /* this data are considered trusted so if this node exists, it means its when must have been true */
+        node->when_status = LYD_WHEN | LYD_WHEN_TRUE;
     }
     node->prev = node;
 
@@ -321,8 +366,8 @@ lyb_parse_anydata(struct lyd_node *node, const char *data, struct lyb_state *lyb
 
 /* generally, fill lyd_val value union */
 static int
-lyb_parse_val_1(struct ly_ctx *ctx, struct lys_type *type, LY_DATA_TYPE value_type, uint8_t value_flags, const char *data,
-                const char **value_str, lyd_val *value, struct lyb_state *lybs)
+lyb_parse_val_1(struct lys_type *type, LY_DATA_TYPE value_type, uint8_t value_flags, const char *data,
+        const char **value_str, lyd_val *value, struct lyb_state *lybs)
 {
     int r, ret;
     size_t i;
@@ -334,9 +379,23 @@ lyb_parse_val_1(struct ly_ctx *ctx, struct lys_type *type, LY_DATA_TYPE value_ty
         /* just read value_str */
         ret = lyb_read_string(data, &str, 0, lybs);
         if (ret > -1) {
-            *value_str = lydict_insert_zc(ctx, str);
+            *value_str = lydict_insert_zc(lybs->ctx, str);
         }
         return ret;
+    }
+
+    /* find the correct structure, go through leafrefs and typedefs */
+    switch (value_type) {
+    case LY_TYPE_ENUM:
+        for (; type->base == LY_TYPE_LEAFREF; type = &type->info.lref.target->type);
+        for (; !type->info.enums.count; type = &type->der->type);
+        break;
+    case LY_TYPE_BITS:
+        for (; type->base == LY_TYPE_LEAFREF; type = &type->info.lref.target->type);
+        for (; !type->info.bits.count; type = &type->der->type);
+        break;
+    default:
+        break;
     }
 
     switch (value_type) {
@@ -346,7 +405,7 @@ lyb_parse_val_1(struct ly_ctx *ctx, struct lys_type *type, LY_DATA_TYPE value_ty
         /* we do not actually fill value now, but value_str */
         ret = lyb_read_string(data, &str, 0, lybs);
         if (ret > -1) {
-            *value_str = lydict_insert_zc(ctx, str);
+            *value_str = lydict_insert_zc(lybs->ctx, str);
         }
         break;
     case LY_TYPE_BINARY:
@@ -355,22 +414,19 @@ lyb_parse_val_1(struct ly_ctx *ctx, struct lys_type *type, LY_DATA_TYPE value_ty
         /* read string */
         ret = lyb_read_string(data, &str, 0, lybs);
         if (ret > -1) {
-            value->string = lydict_insert_zc(ctx, str);
+            value->string = lydict_insert_zc(lybs->ctx, str);
         }
         break;
     case LY_TYPE_BITS:
-        /* find the correct structure */
-        for (; !type->info.bits.count; type = &type->der->type);
-
         value->bit = calloc(type->info.bits.count, sizeof *value->bit);
-        LY_CHECK_ERR_RETURN(!value->bit, LOGMEM(ctx), -1);
+        LY_CHECK_ERR_RETURN(!value->bit, LOGMEM(lybs->ctx), -1);
 
         /* read values */
         ret = 0;
         for (i = 0; i < type->info.bits.count; ++i) {
             if (i % 8 == 0) {
                 /* read another byte */
-                ret += (r = lyb_read(data, &byte, sizeof byte, lybs));
+                ret += (r = lyb_read(data + ret, &byte, sizeof byte, lybs));
                 if (r < 0) {
                     return -1;
                 }
@@ -394,9 +450,6 @@ lyb_parse_val_1(struct ly_ctx *ctx, struct lys_type *type, LY_DATA_TYPE value_ty
         ret = 0;
         break;
     case LY_TYPE_ENUM:
-        /* find the correct structure */
-        for (; !type->info.enums.count; type = &type->der->type);
-
         num = 0;
         ret = lyb_read_enum(&num, type->info.enums.count, data, lybs);
         if (ret > 0) {
@@ -411,15 +464,18 @@ lyb_parse_val_1(struct ly_ctx *ctx, struct lys_type *type, LY_DATA_TYPE value_ty
     case LY_TYPE_INT16:
     case LY_TYPE_UINT16:
         ret = lyb_read_number((uint64_t *)&value->uint16, 2, data, lybs);
+        value->uint16 = le16toh(value->uint16);
         break;
     case LY_TYPE_INT32:
     case LY_TYPE_UINT32:
         ret = lyb_read_number((uint64_t *)&value->uint32, 4, data, lybs);
+        value->uint32 = le32toh(value->uint32);
         break;
     case LY_TYPE_DEC64:
     case LY_TYPE_INT64:
     case LY_TYPE_UINT64:
         ret = lyb_read_number((uint64_t *)&value->uint64, 8, data, lybs);
+        value->uint64 = le64toh(value->uint64);
         break;
     default:
         return -1;
@@ -434,6 +490,7 @@ lyb_parse_val_2(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
 {
     struct ly_ctx *ctx;
     struct lys_module *mod;
+    struct lys_type *rtype = NULL;
     char num_str[22], *str;
     int64_t frac;
     uint32_t i, str_len;
@@ -475,12 +532,25 @@ lyb_parse_val_2(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
 
     /* we are parsing leafref/ptr union stored as the target type,
      * so we first parse it into string and then resolve the leafref/ptr union */
-    if (!(*value_flags & LY_VALUE_UNRES) && ((type->base == LY_TYPE_LEAFREF)
-            || (type->base == LY_TYPE_INST) || ((type->base == LY_TYPE_UNION) && type->info.uni.has_ptr_type))) {
+    if ((type->base == LY_TYPE_LEAFREF) || (type->base == LY_TYPE_INST)
+            || ((type->base == LY_TYPE_UNION) && type->info.uni.has_ptr_type)) {
         if ((value_type == LY_TYPE_INST) || (value_type == LY_TYPE_IDENT) || (value_type == LY_TYPE_UNION)) {
             /* we already have a string */
             goto parse_reference;
         }
+    }
+
+    /* find the correct structure, go through leafrefs and typedefs */
+    switch (value_type) {
+    case LY_TYPE_BITS:
+        for (rtype = type; rtype->base == LY_TYPE_LEAFREF; rtype = &rtype->info.lref.target->type);
+        for (; !rtype->info.bits.count; rtype = &rtype->der->type);
+        break;
+    case LY_TYPE_DEC64:
+        for (rtype = type; rtype->base == LY_TYPE_LEAFREF; rtype = &type->info.lref.target->type);
+        break;
+    default:
+        break;
     }
 
     switch (value_type) {
@@ -502,14 +572,12 @@ lyb_parse_val_2(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
         *value_str = value->string;
         break;
     case LY_TYPE_BITS:
-        for (; !type->info.bits.count; type = &type->der->type);
-
         /* print the set bits */
         str = malloc(1);
         LY_CHECK_ERR_RETURN(!str, LOGMEM(ctx), -1);
         str[0] = '\0';
         str_len = 0;
-        for (i = 0; i < type->info.bits.count; ++i) {
+        for (i = 0; i < rtype->info.bits.count; ++i) {
             if (value->bit[i]) {
                 str = ly_realloc(str, str_len + strlen(value->bit[i]->name) + (str_len ? 1 : 0) + 1);
                 LY_CHECK_ERR_RETURN(!str, LOGMEM(ctx), -1);
@@ -566,31 +634,31 @@ lyb_parse_val_2(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
         *value_str = lydict_insert(ctx, num_str, 0);
         break;
     case LY_TYPE_INT64:
-        sprintf(num_str, "%ld", value->int64);
+        sprintf(num_str, "%"PRId64, value->int64);
         *value_str = lydict_insert(ctx, num_str, 0);
         break;
     case LY_TYPE_UINT64:
-        sprintf(num_str, "%lu", value->uint64);
+        sprintf(num_str, "%"PRIu64, value->uint64);
         *value_str = lydict_insert(ctx, num_str, 0);
         break;
     case LY_TYPE_DEC64:
-        frac = value->dec64 % type->info.dec64.div;
-        dig = type->info.dec64.dig;
+        frac = value->dec64 % rtype->info.dec64.div;
+        dig = rtype->info.dec64.dig;
         /* remove trailing zeros */
         while ((dig > 1) && !(frac % 10)) {
             frac /= 10;
             --dig;
         }
 
-        sprintf(num_str, "%ld.%.*ld", value->dec64 / (int64_t)type->info.dec64.div, dig, frac);
+        sprintf(num_str, "%"PRId64".%.*"PRId64, value->dec64 / (int64_t)rtype->info.dec64.div, dig, frac);
         *value_str = lydict_insert(ctx, num_str, 0);
         break;
     default:
         return -1;
     }
 
-    if (!(*value_flags & LY_VALUE_UNRES) && ((type->base == LY_TYPE_LEAFREF)
-            || (type->base == LY_TYPE_INST) || ((type->base == LY_TYPE_UNION) && type->info.uni.has_ptr_type))) {
+    if ((type->base == LY_TYPE_LEAFREF) || (type->base == LY_TYPE_INST)
+            || ((type->base == LY_TYPE_UNION) && type->info.uni.has_ptr_type)) {
 parse_reference:
         assert(*value_str);
 
@@ -625,7 +693,6 @@ lyb_parse_value(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
     int r, ret = 0;
     uint8_t start_byte;
 
-    struct ly_ctx *ctx;
     const char **value_str;
     lyd_val *value;
     LY_DATA_TYPE *value_type;
@@ -634,13 +701,11 @@ lyb_parse_value(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
     assert((leaf || attr) && (!leaf || !attr));
 
     if (leaf) {
-        ctx = leaf->schema->module->ctx;
         value_str = &leaf->value_str;
         value = &leaf->value;
         value_type = &leaf->value_type;
         value_flags = &leaf->value_flags;
     } else {
-        ctx = attr->annotation->module->ctx;
         value_str = &attr->value_str;
         value = &attr->value;
         value_type = &attr->value_type;
@@ -664,11 +729,11 @@ lyb_parse_value(struct lys_type *type, struct lyd_node_leaf_list *leaf, struct l
         *value_flags |= LY_VALUE_UNRES;
     }
 
-    ret += (r = lyb_parse_val_1(ctx, type, *value_type, *value_flags, data, value_str, value, lybs));
+    ret += (r = lyb_parse_val_1(type, *value_type, *value_flags, data, value_str, value, lybs));
     LYB_HAVE_READ_RETURN(r, data, -1);
 
     /* union is handled specially */
-    if (type->base == LY_TYPE_UNION) {
+    if ((type->base == LY_TYPE_UNION) && !(*value_flags & LY_VALUE_USER)) {
         assert(*value_type == LY_TYPE_STRING);
 
         *value_str = value->string;
@@ -749,7 +814,6 @@ lyb_parse_attributes(struct lyd_node *node, const char *data, int options, struc
     struct lys_type **type;
     struct lyd_attr *attr = NULL;
     struct lys_ext_instance_complex *ext;
-    struct ly_ctx *ctx = node->schema->module->ctx;
 
     /* read number of attributes stored */
     ret += (r = lyb_read(data, &count, 1, lybs));
@@ -761,7 +825,7 @@ lyb_parse_attributes(struct lyd_node *node, const char *data, int options, struc
         LYB_HAVE_READ_GOTO(r, data, error);
 
         /* find model */
-        ret += (r = lyb_parse_model(ctx, data, &mod, lybs));
+        ret += (r = lyb_parse_model(data, &mod, lybs));
         LYB_HAVE_READ_GOTO(r, data, error);
 
         if (mod) {
@@ -784,12 +848,12 @@ lyb_parse_attributes(struct lyd_node *node, const char *data, int options, struc
             assert(!node->attr);
 
             attr = calloc(1, sizeof *attr);
-            LY_CHECK_ERR_GOTO(!attr, LOGMEM(ctx), error);
+            LY_CHECK_ERR_GOTO(!attr, LOGMEM(lybs->ctx), error);
 
             node->attr = attr;
         } else {
             attr->next = calloc(1, sizeof *attr);
-            LY_CHECK_ERR_GOTO(!attr->next, LOGMEM(ctx), error);
+            LY_CHECK_ERR_GOTO(!attr->next, LOGMEM(lybs->ctx), error);
 
             attr = attr->next;
         }
@@ -798,7 +862,7 @@ lyb_parse_attributes(struct lyd_node *node, const char *data, int options, struc
         attr->annotation = ext;
 
         /* attribute name */
-        attr->name = lydict_insert(ctx, attr->annotation->arg_value, 0);
+        attr->name = lydict_insert(lybs->ctx, attr->annotation->arg_value, 0);
 
         /* get the type */
         type = (struct lys_type **)lys_ext_complex_get_substmt(LY_STMT_TYPE, attr->annotation, NULL);
@@ -817,7 +881,7 @@ stop_subtree:
     return ret;
 
 error:
-    lyd_free_attr(ctx, node, node->attr, 1);
+    lyd_free_attr(lybs->ctx, node, node->attr, 1);
     return -1;
 }
 
@@ -846,17 +910,19 @@ lyb_parse_schema_hash(const struct lys_node *sparent, const struct lys_module *m
     uint8_t i, j;
     struct lys_node *sibling;
     LYB_HASH hash[LYB_HASH_BITS - 1];
-    struct ly_ctx *ctx;
 
     assert((sparent || mod) && (!sparent || !mod));
-    ctx = (sparent ? sparent->module->ctx : mod->ctx);
 
     /* read the first hash */
     ret += (r = lyb_read(data, &hash[0], sizeof *hash, lybs));
     LYB_HAVE_READ_RETURN(r, data, -1);
 
     /* based on the first hash read all the other ones, if any */
-    for (i = 0; !(hash[0] & (LYB_HASH_COLLISION_ID >> i)); ++i);
+    for (i = 0; !(hash[0] & (LYB_HASH_COLLISION_ID >> i)); ++i) {
+        if (i > LYB_HASH_BITS) {
+            return -1;
+        }
+    }
 
     /* move the first hash on its accurate position */
     hash[i] = hash[0];
@@ -915,9 +981,11 @@ finish:
     *snode = sibling;
     if (!sibling && (options & LYD_OPT_STRICT)) {
         if (mod) {
-            LOGVAL(ctx, LYE_SPEC, LY_VLOG_NONE, NULL, "Failed to find matching hash for a top-level node from \"%s\".", mod->name);
+            LOGVAL(lybs->ctx, LYE_SPEC, LY_VLOG_NONE, NULL, "Failed to find matching hash for a top-level node from \"%s\".",
+                    mod->name);
         } else {
-            LOGVAL(ctx, LYE_SPEC, LY_VLOG_LYS, sparent, "Failed to find matching hash for a child of \"%s\".", sparent->name);
+            LOGVAL(lybs->ctx, LYE_SPEC, LY_VLOG_LYS, sparent, "Failed to find matching hash for a child of \"%s\".",
+                    sparent->name);
         }
         return -1;
     }
@@ -926,8 +994,8 @@ finish:
 }
 
 static int
-lyb_parse_subtree(struct ly_ctx *ctx, const char *data, struct lyd_node *parent, struct lyd_node **first_sibling,
-                  const char *yang_data_name, int options, struct unres_data *unres, struct lyb_state *lybs)
+lyb_parse_subtree(const char *data, struct lyd_node *parent, struct lyd_node **first_sibling, const char *yang_data_name,
+        int options, struct unres_data *unres, struct lyb_state *lybs)
 {
     int r, ret = 0;
     struct lyd_node *node = NULL, *iter;
@@ -942,7 +1010,7 @@ lyb_parse_subtree(struct ly_ctx *ctx, const char *data, struct lyd_node *parent,
 
     if (!parent) {
         /* top-level, read module name */
-        ret += (r = lyb_parse_model(ctx, data, &mod, lybs));
+        ret += (r = lyb_parse_model(data, &mod, lybs));
         LYB_HAVE_READ_GOTO(r, data, error);
 
         if (mod) {
@@ -963,7 +1031,9 @@ lyb_parse_subtree(struct ly_ctx *ctx, const char *data, struct lyd_node *parent,
         do {
             ret += (r = lyb_read(data, NULL, lybs->written[lybs->used - 1], lybs));
             /* also skip the meta information inside */
-            ret += (r = lyb_read(data, NULL, lybs->inner_chunks[lybs->used - 1] * LYB_META_BYTES, lybs));
+            r = lybs->inner_chunks[lybs->used - 1] * LYB_META_BYTES;
+            data += r;
+            ret += r;
         } while (lybs->written[lybs->used - 1]);
         goto stop_subtree;
     }
@@ -1027,7 +1097,7 @@ lyb_parse_subtree(struct ly_ctx *ctx, const char *data, struct lyd_node *parent,
 
     /* read all descendants */
     while (lybs->written[lybs->used - 1]) {
-        ret += (r = lyb_parse_subtree(ctx, data, node, NULL, NULL, options, unres, lybs));
+        ret += (r = lyb_parse_subtree(data, node, NULL, NULL, options, unres, lybs));
         LYB_HAVE_READ_GOTO(r, data, error);
     }
 
@@ -1067,21 +1137,53 @@ error:
 }
 
 static int
-lyb_parse_data_models(struct ly_ctx *ctx, const char *data, struct lyb_state *lybs)
+lyb_parse_data_models(const char *data, struct lyb_state *lybs)
 {
     int i, r, ret = 0;
+    uint8_t mod_count_buf[2];
 
     /* read model count */
-    ret += (r = lyb_read(data, (uint8_t *)&lybs->mod_count, 2, lybs));
+    ret += (r = lyb_read(data, mod_count_buf, 2, lybs));
     LYB_HAVE_READ_RETURN(r, data, -1);
+    lybs->mod_count = mod_count_buf[0] | (mod_count_buf[1] << 8);
 
     lybs->models = malloc(lybs->mod_count * sizeof *lybs->models);
-    LY_CHECK_ERR_RETURN(!lybs->models, LOGMEM(NULL), -1);
+    LY_CHECK_ERR_RETURN(!lybs->models, LOGMEM(lybs->ctx), -1);
 
     /* read modules */
     for (i = 0; i < lybs->mod_count; ++i) {
-        ret += (r = lyb_parse_model(ctx, data, &lybs->models[i], lybs));
+        ret += (r = lyb_parse_model(data, &lybs->models[i], lybs));
         LYB_HAVE_READ_RETURN(r, data, -1);
+    }
+
+    return ret;
+}
+
+static int
+lyb_parse_magic_number(const char *data, struct lyb_state *lybs)
+{
+    int r, ret = 0;
+    char magic_byte = 0;
+
+    ret += (r = lyb_read(data, (uint8_t *)&magic_byte, 1, lybs));
+    LYB_HAVE_READ_RETURN(r, data, -1);
+    if (magic_byte != 'l') {
+        LOGERR(lybs->ctx, LY_EINVAL, "Invalid first magic number byte \"0x%02x\".", magic_byte);
+        return -1;
+    }
+
+    ret += (r = lyb_read(data, (uint8_t *)&magic_byte, 1, lybs));
+    LYB_HAVE_READ_RETURN(r, data, -1);
+    if (magic_byte != 'y') {
+        LOGERR(lybs->ctx, LY_EINVAL, "Invalid second magic number byte \"0x%02x\".", magic_byte);
+        return -1;
+    }
+
+    ret += (r = lyb_read(data, (uint8_t *)&magic_byte, 1, lybs));
+    LYB_HAVE_READ_RETURN(r, data, -1);
+    if (magic_byte != 'b') {
+        LOGERR(lybs->ctx, LY_EINVAL, "Invalid third magic number byte \"0x%02x\".", magic_byte);
+        return -1;
     }
 
     return ret;
@@ -1121,21 +1223,26 @@ lyd_parse_lyb(struct ly_ctx *ctx, const char *data, int options, const struct ly
     lybs.size = LYB_STATE_STEP;
     lybs.models = NULL;
     lybs.mod_count = 0;
+    lybs.ctx = ctx;
 
     unres = calloc(1, sizeof *unres);
     LY_CHECK_ERR_GOTO(!unres, LOGMEM(ctx), finish);
+
+    /* read magic number */
+    ret += (r = lyb_parse_magic_number(data, &lybs));
+    LYB_HAVE_READ_GOTO(r, data, finish);
 
     /* read header */
     ret += (r = lyb_parse_header(data, &lybs));
     LYB_HAVE_READ_GOTO(r, data, finish);
 
     /* read used models */
-    ret += (r = lyb_parse_data_models(ctx, data, &lybs));
+    ret += (r = lyb_parse_data_models(data, &lybs));
     LYB_HAVE_READ_GOTO(r, data, finish);
 
     /* read subtree(s) */
     while (data[0]) {
-        ret += (r = lyb_parse_subtree(ctx, data, NULL, &node, yang_data_name, options, unres, &lybs));
+        ret += (r = lyb_parse_subtree(data, NULL, &node, yang_data_name, options, unres, &lybs));
         if (r < 0) {
             lyd_free_withsiblings(node);
             node = NULL;
@@ -1167,7 +1274,7 @@ lyd_parse_lyb(struct ly_ctx *ctx, const char *data, int options, const struct ly
                 LY_TREE_DFS_END(node, next, act_notif);
             }
         }
-        if (lyd_defaults_add_unres(&node, options, ctx, data_tree, act_notif, unres, 0)) {
+        if (lyd_defaults_add_unres(&node, options, ctx, NULL, 0, data_tree, act_notif, unres, 0)) {
             lyd_free_withsiblings(node);
             node = NULL;
             goto finish;

@@ -5,17 +5,11 @@ __author__ = "Matija Amidzic <matija.amidzic@sartura.hr>"
 __copyright__ = "Copyright 2018, Deutsche Telekom AG"
 __license__ = "BSD 3-Clause"
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# This source code is licensed under BSD 3-Clause License (the "License").
+# You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#     https://opensource.org/licenses/BSD-3-Clause
 
 import yang as ly
 import unittest
@@ -445,6 +439,123 @@ class TestUM(unittest.TestCase):
         except Exception as e:
             self.fail(e)
 
+    def test_ly_ctx_new_ylpath(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+        path = config.TESTS_DIR + "/api/files/ylpath.xml"
+
+        try:
+            ctx = ly.Context(yang_folder, path, ly.LYD_XML, 0)
+            self.assertIsNotNone(ctx)
+            list = ctx.get_searchdirs()
+            self.assertIsNotNone(list)
+            self.assertEqual(1, len(list))
+
+        except Exception as e:
+            self.fail(e)
+
+    def test_ly_ctx_new_ylmem(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+            info = ctx.info()
+            self.assertIsNotNone(info)
+            self.assertEqual(ly.LYD_VAL_OK, info.validity())
+
+            mem = info.print_mem(ly.LYD_XML, 0)
+            self.assertIsNotNone(mem)
+
+            new_ctx = ly.Context(yang_folder, ly.LYD_XML, mem, 0)
+            self.assertIsNotNone(new_ctx)
+            list = ctx.get_searchdirs()
+            self.assertIsNotNone(list)
+            self.assertEqual(1, len(list))
+
+        except Exception as e:
+            self.fail(e)
+
+    def test_ly_ctx_get_module_iter(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+        module_name = "a"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+
+            module = ctx.load_module(module_name)
+            self.assertIsNotNone(module)
+            self.assertEqual(module_name, module.name())
+            itr = ctx.get_module_iter()
+            self.assertIsNotNone(itr)
+            self.assertEqual(7, len(itr))
+
+        except Exception as e:
+            self.fail(e)
+
+
+    def test_ly_ctx_get_disabled_module_iter(self):
+        yang_folder = config.TESTS_DIR +  "/api/files"
+        module_name = "x"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+
+            module = ctx.load_module(module_name)
+            self.assertIsNotNone(module)
+            self.assertEqual(module_name, module.name())
+            # FIXME no way to disable module from here
+
+            itr = ctx.get_disabled_module_iter()
+            self.assertIsNotNone(itr)
+            self.assertEqual(0, len(itr))
+
+        except Exception as e:
+            self.fail(e)
+
+    def test_ly_ctx_data_instantiables(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+        module_name = "b"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+
+            module = ctx.load_module(module_name)
+            self.assertIsNotNone(module)
+            self.assertEqual(module_name, module.name())
+
+            instantiables = ctx.data_instantiables(0)
+            self.assertIsNotNone(instantiables)
+            self.assertEqual(5, len(instantiables))
+
+        except Exception as e:
+            self.fail(e)
+
+    def test_ly_ctx_get_node(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+        module_name = "b"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+
+            module = ctx.load_module(module_name)
+            self.assertIsNotNone(module)
+            self.assertEqual(module_name, module.name())
+
+            instantiables = ctx.data_instantiables(0)
+            self.assertIsNotNone(instantiables)
+            self.assertEqual(5, len(instantiables))
+
+            schema = instantiables[0];
+            self.assertIsNotNone(schema)
+            node = ctx.get_node(schema, "/b:x/b:bubba", 0)
+            self.assertIsNotNone(node)
+
+        except Exception as e:
+            self.fail(e)
 
 if __name__ == '__main__':
     unittest.main()

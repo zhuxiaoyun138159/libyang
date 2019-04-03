@@ -75,6 +75,7 @@ struct lyb_state {
     int size;
     const struct lys_module **models;
     int mod_count;
+    struct ly_ctx *ctx;
 
     /* LYB printer only */
     struct {
@@ -216,9 +217,10 @@ void lys_submodule_free(struct lys_submodule *submodule, void (*private_destruct
  * the module of the \p child element. If the \p parent parameter is present,
  * the \p module parameter is ignored.
  * @param[in] child The schema tree node to be added.
+ * @param[in] options Parsing options. Only relevant when creating a shorthand case.
  * @return 0 on success, nonzero else
  */
-int lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys_node *child);
+int lys_node_addchild(struct lys_node *parent, struct lys_module *module, struct lys_node *child, int options);
 
 /**
  * @brief Find a valid grouping definition relative to a node.
@@ -483,19 +485,21 @@ int lys_get_sibling(const struct lys_node *siblings, const char *mod_name, int m
  * @param[in] name Node name.
  * @param[in] nam_len Node \p name length.
  * @param[in] type ORed desired type of the node. 0 means any (data node) type.
+ * @param[in] getnext_opts lys_getnext() options to use.
  * @param[out] ret Pointer to the node of the desired type. Can be NULL.
  *
  * @return EXIT_SUCCESS on success, EXIT_FAILURE on fail.
  */
 int lys_getnext_data(const struct lys_module *mod, const struct lys_node *parent, const char *name, int nam_len,
-                     LYS_NODE type, const struct lys_node **ret);
+                     LYS_NODE type, int getnext_opts, const struct lys_node **ret);
 
 int lyd_get_unique_default(const char* unique_expr, struct lyd_node *list, const char **dflt);
 
 int lyd_build_relative_data_path(const struct lys_module *module, const struct lyd_node *node, const char *schema_id,
                                  char *buf);
 
-void lyd_free_value(lyd_val value, LY_DATA_TYPE value_type, uint8_t value_flags, struct lys_type *type);
+void lyd_free_value(lyd_val value, LY_DATA_TYPE value_type, uint8_t value_flags, struct lys_type *type,
+                    const char *value_str, lyd_val *old_val, LY_DATA_TYPE *old_val_type, uint8_t *old_val_flags);
 
 int lyd_list_equal(struct lyd_node *node1, struct lyd_node *node2, int with_defaults);
 
@@ -507,10 +511,13 @@ int lys_make_implemented_r(struct lys_module *module, struct unres_schema *unres
  *
  * @param[in] root Data tree to validate.
  * @param[in] ctx libyang context (for the case when the data tree is empty - i.e. root == NULL).
+ * @param[in] modules Only check mandatory nodes from these modules. If not set, check for all modules in the context.
+ * @param[in] mod_count Number of modules in \p modules.
  * @param[in] options Standard @ref parseroptions.
  * @return EXIT_SUCCESS or EXIT_FAILURE.
  */
-int lyd_check_mandatory_tree(struct lyd_node *root, struct ly_ctx *ctx, int options);
+int lyd_check_mandatory_tree(struct lyd_node *root, struct ly_ctx *ctx, const struct lys_module **modules, int mod_count,
+                             int options);
 
 /**
  * @brief Check if the provided node is inside a grouping.
@@ -520,6 +527,10 @@ int lyd_check_mandatory_tree(struct lyd_node *root, struct ly_ctx *ctx, int opti
  */
 int lys_ingrouping(const struct lys_node *node);
 
+int unres_data_diff_new(struct unres_data *unres, struct lyd_node *subtree, struct lyd_node *parent, int created);
+
+void unres_data_diff_rem(struct unres_data *unres, unsigned int idx);
+
 /**
  * @brief Process (add/clean) default nodes in the data tree and resolve the unresolved items
  *
@@ -527,6 +538,8 @@ int lys_ingrouping(const struct lys_node *node);
  *                      is empty
  * @param[in] options   Parser options to know the data tree type, see @ref parseroptions.
  * @param[in] ctx       Context for the case the \p root is empty (in that case \p ctx must not be NULL)
+ * @param[in] modules   Only modules that will be traversed when adding default values.
+ * @param[in] mod_count Number of module names in \p modules.
  * @param[in] data_tree Additional data tree for validating RPC/action/notification. The tree is used to satisfy
  *                      possible references to the datastore content.
  * @param[in] act_notif In case of nested action/notification, pointer to the subroot of the action/notification. Note
@@ -536,8 +549,9 @@ int lys_ingrouping(const struct lys_node *node);
  * @param[in] wd        Whether to add default values.
  * @return EXIT_SUCCESS or EXIT_FAILURE
  */
-int lyd_defaults_add_unres(struct lyd_node **root, int options, struct ly_ctx *ctx, const struct lyd_node *data_tree,
-                           struct lyd_node *act_notif, struct unres_data *unres, int wd);
+int lyd_defaults_add_unres(struct lyd_node **root, int options, struct ly_ctx *ctx, const struct lys_module **modules,
+                           int mod_count, const struct lyd_node *data_tree, struct lyd_node *act_notif,
+                           struct unres_data *unres, int wd);
 
 void lys_enable_deviations(struct lys_module *module);
 

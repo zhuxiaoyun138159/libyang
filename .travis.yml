@@ -23,7 +23,7 @@ addons:
     project:
       name: "CESNET/libyang"
     notification_email: rkrejci@cesnet.cz
-    build_command_prepend: "cmake .; make clean"
+    build_command_prepend: "mkdir build; cd build; cmake ..; make clean"
     build_command:   "make"
     branch_pattern: coverity
 

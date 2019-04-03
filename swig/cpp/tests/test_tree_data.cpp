@@ -65,6 +65,7 @@ const char *lys_module_a = \
       <type name=\"string\"/>                         \
       <default value=\"def\"/>                        \
     </leaf>                                           \
+    <anydata name=\"any-data\"/>                              \
   </container>                                        \
   <leaf name=\"y\"><type name=\"string\"/></leaf>     \
   <anyxml name=\"any\"/>                              \
@@ -141,7 +142,7 @@ TEST(test_ly_ctx_parse_data_mem)
     const char *yin_file = TESTS_DIR "/api/files/a.yin";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_path(yin_file, LYS_IN_YIN);
 
@@ -150,7 +151,7 @@ TEST(test_ly_ctx_parse_data_mem)
         ASSERT_STREQ("x", root->schema()->name());
     } catch( const std::exception& e ) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -161,19 +162,19 @@ TEST(test_ly_ctx_parse_data_fd)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_path(yin_file, LYS_IN_YIN);
 
         FILE *f = fopen(config_file, "r");
-        auto fd = f->_fileno;
+        auto fd = fileno(f);
         auto root = ctx->parse_data_fd(fd, LYD_XML, LYD_OPT_NOSIBLINGS | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
         ASSERT_STREQ("x", root->schema()->name());
         fclose(f);
     } catch( const std::exception& e ) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -186,7 +187,7 @@ TEST(test_ly_ctx_parse_data_path)
     const char *schema_name = "x";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         auto module = ctx->parse_module_path(yin_file, LYS_IN_YIN);
         ASSERT_NOTNULL(module);
@@ -197,7 +198,7 @@ TEST(test_ly_ctx_parse_data_path)
         ASSERT_STREQ(schema_name, root->schema()->name());
     } catch( const std::exception& e ) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -206,7 +207,7 @@ TEST(test_ly_ctx_parse_data_path_invalid)
     const char *yang_folder = TESTS_DIR "/api/files";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
 
         auto root = ctx->parse_data_path("INVALID_PATH", LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -223,21 +224,17 @@ TEST(test_ly_data_node)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
 
-        auto new_node = S_Data_Node(new Data_Node(root, root->child()->schema()->module(), "bar-y"));
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->child()->schema()->module(), "bar-y");
         ASSERT_NOTNULL(new_node);
-        new_node = S_Data_Node(new Data_Node(root, root->schema()->module(), "number32", "100"));
-        ASSERT_NOTNULL(new_node);
-        auto dup_node = new_node->dup(0);
-        ASSERT_NOTNULL(dup_node);
     } catch( const std::exception& e ) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -247,14 +244,14 @@ TEST(test_ly_data_node_new_path)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         auto mod = ctx->get_module("a", nullptr, 1);
         ASSERT_NOTNULL(mod);
 
-        auto root = S_Data_Node(new Data_Node(ctx, "/a:x/bar-gggg", "a", LYD_ANYDATA_CONSTSTRING, 0));
+        auto root = std::make_shared<libyang::Data_Node>(ctx, "/a:x/bar-gggg", "a", LYD_ANYDATA_CONSTSTRING, 0);
         ASSERT_NOTNULL(root);
         ASSERT_STREQ("x", root->schema()->name());
         ASSERT_STREQ("bar-gggg", root->child()->schema()->name());
@@ -285,7 +282,7 @@ TEST(test_ly_data_node_new_path)
         ASSERT_STREQ("value", node->child()->next()->next()->schema()->name());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -295,19 +292,19 @@ TEST(test_ly_data_node_insert)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
-        auto new_node = S_Data_Node(new Data_Node(root, root->schema()->module(), "number32", "200"));
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->schema()->module(), "number32", "200");
         ASSERT_NOTNULL(new_node);
         auto rc = root->insert(new_node);
         ASSERT_EQ(0, rc);
         ASSERT_STREQ("number32", root->child()->prev()->schema()->name());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -317,14 +314,14 @@ TEST(test_ly_data_node_insert_sibling)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
 
         auto last = root->prev();
-        auto new_node = S_Data_Node(new Data_Node(nullptr, root->schema()->module(), "y", "test"));
+        auto new_node = std::make_shared<libyang::Data_Node>(nullptr, root->schema()->module(), "y", "test");
         ASSERT_NOTNULL(new_node);
         auto rc = root->insert_sibling(new_node);
         ASSERT_EQ(0, rc);
@@ -332,7 +329,7 @@ TEST(test_ly_data_node_insert_sibling)
         ASSERT_STREQ("y", root->prev()->schema()->name());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -342,14 +339,14 @@ TEST(test_ly_data_node_insert_before)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
 
         auto last = root->prev();
-        auto new_node = S_Data_Node(new Data_Node(nullptr, root->schema()->module(), "y", "test"));
+        auto new_node = std::make_shared<libyang::Data_Node>(nullptr, root->schema()->module(), "y", "test");
         ASSERT_NOTNULL(new_node);
         auto rc = root->insert_before(new_node);
         ASSERT_EQ(0, rc);
@@ -357,7 +354,7 @@ TEST(test_ly_data_node_insert_before)
         ASSERT_STREQ("y", root->prev()->schema()->name());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -367,14 +364,14 @@ TEST(test_ly_data_node_insert_after)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
 
         auto last = root->next();
-        auto new_node = S_Data_Node(new Data_Node(nullptr, root->schema()->module(), "y", "test"));
+        auto new_node = std::make_shared<libyang::Data_Node>(nullptr, root->schema()->module(), "y", "test");
         ASSERT_NOTNULL(new_node);
         auto rc = root->insert_after(new_node);
         ASSERT_EQ(0, rc);
@@ -382,7 +379,7 @@ TEST(test_ly_data_node_insert_after)
         ASSERT_STREQ("y", root->next()->schema()->name());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -392,33 +389,33 @@ TEST(test_ly_data_node_schema_sort)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         auto mod = ctx->get_module("a", nullptr, 1);
         ASSERT_NOTNULL(mod);
 
-        auto root = S_Data_Node(new Data_Node(nullptr, mod, "l"));
+        auto root = std::make_shared<libyang::Data_Node>(nullptr, mod, "l");
         ASSERT_NOTNULL(root);
-        auto node = S_Data_Node(new Data_Node(root, mod, "key1", "1"));
+        auto node = std::make_shared<libyang::Data_Node>(root, mod, "key1", "1");
         ASSERT_NOTNULL(node);
-        node = S_Data_Node(new Data_Node(root, mod, "key2", "2"));
+        node = std::make_shared<libyang::Data_Node>(root, mod, "key2", "2");
         ASSERT_NOTNULL(node);
 
-        node = S_Data_Node(new Data_Node(nullptr, mod, "x"));
+        node = std::make_shared<libyang::Data_Node>(nullptr, mod, "x");
         ASSERT_NOTNULL(node);
         auto rc = root->insert_after(node);
         ASSERT_EQ(0, rc);
         node = root->next();
 
-        auto node2 = S_Data_Node(new Data_Node(node, mod, "bubba", "a"));
+        auto node2 = std::make_shared<libyang::Data_Node>(node, mod, "bubba", "a");
         ASSERT_NOTNULL(node2);
-        node2 = S_Data_Node(new Data_Node(node, mod, "bar-gggg", "b"));
+        node2 = std::make_shared<libyang::Data_Node>(node, mod, "bar-gggg", "b");
         ASSERT_NOTNULL(node2);
-        node2 = S_Data_Node(new Data_Node(node, mod, "number64", "64"));
+        node2 = std::make_shared<libyang::Data_Node>(node, mod, "number64", "64");
         ASSERT_NOTNULL(node2);
-        node2 = S_Data_Node(new Data_Node(node, mod, "number32", "32"));
+        node2 = std::make_shared<libyang::Data_Node>(node, mod, "number32", "32");
         ASSERT_NOTNULL(node2);
 
         rc = root->schema_sort(1);
@@ -434,7 +431,7 @@ TEST(test_ly_data_node_schema_sort)
         ASSERT_STREQ("number64", root->child()->next()->next()->next()->schema()->name());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -444,7 +441,7 @@ TEST(test_ly_data_node_find_path)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -457,7 +454,7 @@ TEST(test_ly_data_node_find_path)
         ASSERT_EQ(1, set->number());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -467,7 +464,7 @@ TEST(test_ly_data_node_find_instance)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -480,17 +477,17 @@ TEST(test_ly_data_node_find_instance)
         ASSERT_EQ(1, set->number());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
-TEST(test_ly_data_node_validate)
+TEST(test_ly_data_node_validate_ctx)
 {
     const char *yang_folder = TESTS_DIR "/api/files";
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -498,7 +495,7 @@ TEST(test_ly_data_node_validate)
 
         auto rc = root->validate(LYD_OPT_CONFIG, ctx);
         ASSERT_EQ(0, rc);
-        auto new_node = S_Data_Node(new Data_Node(root, root->schema()->module(), "number32", "1"));
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->schema()->module(), "number32", "1");
         ASSERT_NOTNULL(new_node);
         rc = root->insert(new_node);
         ASSERT_EQ(0, rc);
@@ -506,7 +503,7 @@ TEST(test_ly_data_node_validate)
         ASSERT_EQ(0, rc);
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -516,14 +513,14 @@ TEST(test_ly_data_node_unlink)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
         ASSERT_NOTNULL(root);
 
         auto node = root->child();
-        auto new_node = S_Data_Node(new Data_Node(root, root->schema()->module(), "number32", "1"));
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->schema()->module(), "number32", "1");
         ASSERT_NOTNULL(new_node);
         auto rc = root->insert(new_node);
         ASSERT_EQ(0, rc);
@@ -536,7 +533,7 @@ TEST(test_ly_data_node_unlink)
         ASSERT_STRNEQ("number32", node->prev()->schema()->name());
     } catch( const std::exception& e ) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -546,7 +543,7 @@ TEST(test_ly_data_node_print_mem_xml)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -556,7 +553,7 @@ TEST(test_ly_data_node_print_mem_xml)
         ASSERT_STREQ(result_xml, result);
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -566,7 +563,7 @@ TEST(test_ly_data_node_print_mem_xml_format)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -576,7 +573,7 @@ TEST(test_ly_data_node_print_mem_xml_format)
         ASSERT_STREQ(result_xml_format, result);
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -586,7 +583,7 @@ TEST(test_ly_data_node_print_mem_json)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -596,7 +593,7 @@ TEST(test_ly_data_node_print_mem_json)
         ASSERT_STREQ(result_json, result);
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
     }
 }
 
@@ -606,7 +603,7 @@ TEST(test_ly_data_node_path)
     const char *config_file = TESTS_DIR "/api/files/a.xml";
 
     try {
-        auto ctx = S_Context(new Context(yang_folder));
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
         ASSERT_NOTNULL(ctx);
         ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
         auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
@@ -620,7 +617,150 @@ TEST(test_ly_data_node_path)
         ASSERT_STREQ("/a:x/bubba", path.c_str());
     } catch (const std::exception& e) {
         mt::printFailed(e.what(), stdout);
-        return;
+        throw;
+    }
+}
+
+TEST(test_ly_data_node_leaf)
+{
+    const char *yang_folder = TESTS_DIR "/api/files";
+    const char *config_file = TESTS_DIR "/api/files/a.xml";
+
+    try {
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
+        ASSERT_NOTNULL(ctx);
+        ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
+        auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
+        ASSERT_NOTNULL(root);
+
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->schema()->module(), "number32", "100");
+        ASSERT_NOTNULL(new_node);
+    } catch( const std::exception& e ) {
+        mt::printFailed(e.what(), stdout);
+        throw;
+    }
+}
+
+TEST(test_ly_data_node_anydata)
+{
+    const char *yang_folder = TESTS_DIR "/api/files";
+    const char *config_file = TESTS_DIR "/api/files/a.xml";
+
+    try {
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
+        ASSERT_NOTNULL(ctx);
+        ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
+        auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
+        ASSERT_NOTNULL(root);
+        auto mod = ctx->get_module("a", nullptr, 1);
+
+        auto new_node = std::make_shared<libyang::Data_Node>(root, mod, "any-data", "100", LYD_ANYDATA_CONSTSTRING);
+        ASSERT_NOTNULL(new_node);
+    } catch( const std::exception& e ) {
+        mt::printFailed(e.what(), stdout);
+        throw;
+    }
+}
+
+TEST(test_ly_data_node_dup)
+{
+    const char *yang_folder = TESTS_DIR "/api/files";
+    const char *config_file = TESTS_DIR "/api/files/a.xml";
+
+    try {
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
+        ASSERT_NOTNULL(ctx);
+        ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
+        auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
+        ASSERT_NOTNULL(root);
+
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->child()->schema()->module(), "bar-y");
+        ASSERT_NOTNULL(new_node);
+        auto dup_node = new_node->dup(0);
+        ASSERT_NOTNULL(dup_node);
+    } catch( const std::exception& e ) {
+        mt::printFailed(e.what(), stdout);
+        throw;
+    }
+}
+
+TEST(test_ly_data_node_dup_to_ctx)
+{
+    const char *sch = "module x {"
+                    "  namespace urn:x;"
+                    "  prefix x;"
+                    "  leaf x { type string; }}";
+    const char *data = "<x xmlns=\"urn:x\">hello</x>";
+
+    try {
+        auto ctx1 = std::make_shared<libyang::Context>(nullptr);
+        ASSERT_NOTNULL(ctx1);
+        ctx1->parse_module_mem(sch, LYS_IN_YANG);
+        auto data1 = ctx1->parse_data_mem(data, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
+        ASSERT_NOTNULL(data1);
+
+        auto ctx2 = std::make_shared<libyang::Context>(nullptr);
+        ASSERT_NOTNULL(ctx2);
+        // we expect NULL due to missing schema in the second ctx
+        auto dup_node = data1->dup_to_ctx(1, ctx2);
+        ASSERT_NULL(dup_node);
+
+        ctx2->parse_module_mem(sch, LYS_IN_YANG);
+        // now we expect success due to schema being added to the second ctx
+        dup_node = data1->dup_to_ctx(0, ctx2);
+        ASSERT_NOTNULL(dup_node);
+    } catch( const std::exception& e ) {
+        mt::printFailed(e.what(), stdout);
+        throw;
+    }
+}
+
+TEST(test_ly_data_node_validate_node)
+{
+    const char *yang_folder = TESTS_DIR "/api/files";
+    const char *config_file = TESTS_DIR "/api/files/a.xml";
+
+    try {
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
+        ASSERT_NOTNULL(ctx);
+        ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
+        auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
+        ASSERT_NOTNULL(root);
+
+        auto rc = root->validate(LYD_OPT_CONFIG, ctx);
+        ASSERT_EQ(0, rc);
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->schema()->module(), "number32", "1");
+        ASSERT_NOTNULL(new_node);
+        rc = root->validate(LYD_OPT_CONFIG, new_node);
+        ASSERT_EQ(0, rc);
+    } catch (const std::exception& e) {
+        mt::printFailed(e.what(), stdout);
+        throw;
+    }
+}
+
+TEST(test_ly_data_node_validate_value)
+{
+    const char *yang_folder = TESTS_DIR "/api/files";
+    const char *config_file = TESTS_DIR "/api/files/a.xml";
+
+    try {
+        auto ctx = std::make_shared<libyang::Context>(yang_folder);
+        ASSERT_NOTNULL(ctx);
+        ctx->parse_module_mem(lys_module_a, LYS_IN_YIN);
+        auto root = ctx->parse_data_path(config_file, LYD_XML, LYD_OPT_CONFIG | LYD_OPT_STRICT);
+        ASSERT_NOTNULL(root);
+
+        auto rc = root->validate(LYD_OPT_CONFIG, ctx);
+        ASSERT_EQ(0, rc);
+        auto new_node = std::make_shared<libyang::Data_Node>(root, root->schema()->module(), "number32", "1");
+        ASSERT_NOTNULL(new_node);
+        ASSERT_EQ(new_node->validate_value("1"), 0);
+        ASSERT_EQ(new_node->validate_value("100"), 0);
+        ASSERT_EQ(new_node->validate_value("110000000"), 0);
+    } catch (const std::exception &e) {
+        mt::printFailed(e.what(), stdout);
+        throw;
     }
 }
 

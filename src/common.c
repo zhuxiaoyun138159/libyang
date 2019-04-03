@@ -1286,27 +1286,24 @@ ly_new_node_validity(const struct lys_node *schema)
     int validity;
 
     validity = LYD_VAL_OK;
-    switch (schema->nodetype) {
-    case LYS_LEAF:
-    case LYS_LEAFLIST:
+
+    if (schema->nodetype & (LYS_LEAF | LYS_LEAFLIST)) {
         if (((struct lys_node_leaf *)schema)->type.base == LY_TYPE_LEAFREF) {
+            /* leafref target validation */
             validity |= LYD_VAL_LEAFREF;
         }
-        validity |= LYD_VAL_MAND;
-        break;
-    case LYS_LIST:
+    }
+    if (schema->nodetype & (LYS_LEAFLIST | LYS_LIST)) {
+        /* duplicit instance check */
+        validity |= LYD_VAL_DUP;
+    }
+    if ((schema->nodetype == LYS_LIST) && ((struct lys_node_list *)schema)->unique_size) {
+        /* unique check */
         validity |= LYD_VAL_UNIQUE;
-        /* fallthrough */
-    case LYS_CONTAINER:
-    case LYS_NOTIF:
-    case LYS_RPC:
-    case LYS_ACTION:
-    case LYS_ANYXML:
-    case LYS_ANYDATA:
+    }
+    if (schema->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_LIST | LYS_CONTAINER | LYS_NOTIF | LYS_RPC | LYS_ACTION | LYS_ANYDATA)) {
+        /* mandatory children check */
         validity |= LYD_VAL_MAND;
-        break;
-    default:
-        break;
     }
 
     return validity;
@@ -1374,6 +1371,7 @@ LYB_HASH
 lyb_hash(struct lys_node *sibling, uint8_t collision_id)
 {
     struct lys_module *mod;
+    int ext_len;
     uint32_t full_hash;
     LYB_HASH hash;
 
@@ -1389,11 +1387,13 @@ lyb_hash(struct lys_node *sibling, uint8_t collision_id)
     full_hash = dict_hash_multi(full_hash, sibling->name, strlen(sibling->name));
     if (collision_id) {
         if (collision_id > strlen(mod->name)) {
-            /* wow */
-            LOGINT(sibling->module->ctx);
-            return 0;
+            /* fine, we will not hash more bytes, just use more bits from the hash than previously */
+            ext_len = strlen(mod->name);
+        } else {
+            /* use one more byte from the module name than before */
+            ext_len = collision_id;
         }
-        full_hash = dict_hash_multi(full_hash, mod->name, collision_id);
+        full_hash = dict_hash_multi(full_hash, mod->name, ext_len);
     }
     full_hash = dict_hash_multi(full_hash, NULL, 0);
 

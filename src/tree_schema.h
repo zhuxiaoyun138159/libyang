@@ -87,7 +87,7 @@ extern "C" {
  * #LY_TREE_DFS_BEGIN and #LY_TREE_DFS_END.
  *
  * Since the next node is selected as part of #LY_TREE_DFS_END, do not use
- * continue statement between the #LY_TREE_DFS_BEGIN and #LY_TREE_DFS_BEGIN.
+ * continue statement between the #LY_TREE_DFS_BEGIN and #LY_TREE_DFS_END.
  *
  * Use with opening curly bracket '{' after the macro.
  *
@@ -112,79 +112,31 @@ extern "C" {
  * type (e.g. lys_node_leaf), caller is supposed to cast it to the base type
  * identical to the other parameters.
  *
- * Use with closing curly bracket '}' after the macro. Also, this macro requires
- * compiler support of a C11 statement _Generic() and should be compiled with
- * support for C11 standard.
+ * Use with closing curly bracket '}' after the macro.
  *
  * @param START Pointer to the starting element processed first.
  * @param NEXT Temporary storage, do not use.
  * @param ELEM Iterator intended for use in the block.
  */
+
 #ifdef __cplusplus
-
-#define LY_TREE_DFS_END(START, NEXT, ELEM)                                    \
-    /* select element for the next run - children first */                    \
-    if (typeid(*(ELEM)) == typeid(struct lyd_node)) {                         \
-        /* child exception for leafs, leaflists and anyxml without children */\
-        if (((struct lyd_node *)(ELEM))->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_ANYDATA)) { \
-            (NEXT) = NULL;                                                    \
-        } else {                                                              \
-            (NEXT) = (ELEM)->child;                                           \
-        }                                                                     \
-    } else if (typeid(*(ELEM)) == typeid(struct lys_node)) {                  \
-        /* child exception for leafs, leaflists and anyxml without children */\
-        if (((struct lys_node *)(ELEM))->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_ANYDATA)) { \
-            (NEXT) = NULL;                                                    \
-        } else {                                                              \
-            (NEXT) = (ELEM)->child;                                           \
-        }                                                                     \
-    } else {                                                                  \
-        (NEXT) = (ELEM)->child;                                               \
-    }                                                                         \
-                                                                              \
-    if (!(NEXT)) {                                                            \
-        /* no children */                                                     \
-        if ((ELEM) == (START)) {                                              \
-            /* we are done, (START) has no children */                        \
-            break;                                                            \
-        }                                                                     \
-        /* try siblings */                                                    \
-        (NEXT) = (ELEM)->next;                                                \
-    }                                                                         \
-    while (!(NEXT)) {                                                         \
-        /* parent is already processed, go to its sibling */                  \
-        if ((typeid(*(ELEM)) == typeid(struct lys_node))                      \
-                && (((struct lys_node *)(ELEM)->parent)->nodetype == LYS_AUGMENT)) {  \
-            (ELEM) = (ELEM)->parent->prev;                                    \
-        } else {                                                              \
-            (ELEM) = (ELEM)->parent;                                          \
-        }                                                                     \
-        /* no siblings, go back through parents */                            \
-        if (typeid(*(ELEM)) == typeid(struct lys_node)) {                     \
-            /* due to possible augments */                                    \
-            if (lys_parent((struct lys_node *)(ELEM)) == lys_parent((struct lys_node *)(START))) { \
-                /* we are done, no next element to process */                 \
-                break;                                                        \
-            }                                                                 \
-        } else if ((ELEM)->parent == (START)->parent) {                       \
-            /* we are done, no next element to process */                     \
-            break;                                                            \
-        }                                                                     \
-        (NEXT) = (ELEM)->next;                                                \
-    }
-
+#define TYPES_COMPATIBLE(type1, type2) typeid(*(type1)) == typeid(type2)
+#elif defined(__GNUC__) || defined(__clang__)
+#define TYPES_COMPATIBLE(type1, type2) __builtin_types_compatible_p(__typeof__(*(type1)), type2)
 #else
+#define TYPES_COMPATIBLE(type1, type2) _Generic(*(type1), type2: 1, default: 0)
+#endif
 
 #define LY_TREE_DFS_END(START, NEXT, ELEM)                                    \
     /* select element for the next run - children first */                    \
-    if (_Generic(*(ELEM), struct lyd_node: 1, default: 0)) {                  \
+    if (TYPES_COMPATIBLE(ELEM, struct lyd_node)) {                            \
         /* child exception for leafs, leaflists and anyxml without children */\
         if (((struct lyd_node *)(ELEM))->schema->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_ANYDATA)) { \
             (NEXT) = NULL;                                                    \
         } else {                                                              \
             (NEXT) = (ELEM)->child;                                           \
         }                                                                     \
-    } else if (_Generic(*(ELEM), struct lys_node: 1, default: 0)) {           \
+    } else if (TYPES_COMPATIBLE(ELEM, struct lys_node)) {                     \
         /* child exception for leafs, leaflists and anyxml without children */\
         if (((struct lys_node *)(ELEM))->nodetype & (LYS_LEAF | LYS_LEAFLIST | LYS_ANYDATA)) { \
             (NEXT) = NULL;                                                    \
@@ -206,14 +158,14 @@ extern "C" {
     }                                                                         \
     while (!(NEXT)) {                                                         \
         /* parent is already processed, go to its sibling */                  \
-        if (_Generic(*(ELEM), struct lys_node: 1, default: 0)                \
+        if (TYPES_COMPATIBLE(ELEM, struct lys_node)                           \
                 && (((struct lys_node *)(ELEM)->parent)->nodetype == LYS_AUGMENT)) {  \
             (ELEM) = (ELEM)->parent->prev;                                    \
         } else {                                                              \
             (ELEM) = (ELEM)->parent;                                          \
         }                                                                     \
         /* no siblings, go back through parents */                            \
-        if (_Generic(*(ELEM), struct lys_node: 1, default: 0)) {              \
+        if (TYPES_COMPATIBLE(ELEM, struct lys_node)) {                        \
             /* due to possible augments */                                    \
             if (lys_parent((struct lys_node *)(ELEM)) == lys_parent((struct lys_node *)(START))) { \
                 /* we are done, no next element to process */                 \
@@ -225,8 +177,6 @@ extern "C" {
         }                                                                     \
         (NEXT) = (ELEM)->next;                                                \
     }
-
-#endif
 
 /**
  * @defgroup schematree Schema Tree
@@ -285,7 +235,7 @@ typedef enum {
  * Values are defined as separated bit values to allow checking using bitwise operations for multiple nodes.
  */
 typedef enum lys_nodetype {
-    LYS_UNKNOWN = 0x0000,        /**< uninitalized unknown statement node */
+    LYS_UNKNOWN = 0x0000,        /**< uninitialized unknown statement node */
     LYS_CONTAINER = 0x0001,      /**< container statement node */
     LYS_CHOICE = 0x0002,         /**< choice statement node */
     LYS_LEAF = 0x0004,           /**< leaf statement node */
@@ -664,6 +614,27 @@ const char * const *ly_get_loaded_plugins(void);
  * usually loaded by this function.
  */
 void ly_load_plugins(void);
+
+/* don't need the contents of these types, just forward-declare them for the next 2 functions. */
+struct lyext_plugin_list;
+struct lytype_plugin_list;
+
+/**
+ * @brief Directly register a YANG extension by pointer.
+ *
+ * This is intended to be called by executables or libraries using libyang, while bringing along their own
+ * application-specific extensions.  Instead of loading them from separate module files through dlopen (which can
+ * introduce additional problems like mismatching or incorrectly installed modules), they can be directly added
+ * by reference.
+ */
+int ly_register_exts(struct lyext_plugin_list *plugin, const char *log_name);
+
+/**
+ * @brief Directly register a YANG type by pointer.
+ *
+ * This is the analog of ly_register_exts(), for types instead of extensions.
+ */
+int ly_register_types(struct lytype_plugin_list *plugin, const char *log_name);
 
 /**
  * @brief Unload all the YANG extension and type plugins.
@@ -1197,8 +1168,8 @@ struct lys_iffeature {
                                           depends on state data nodes outside their subtree (applicable only to RPCs,
                                           notifications, and actions) */
 #define LYS_LEAFREF_DEP  0x800       /**< flag marking nodes, whose validation (leafrefs)
-                                          depends on nodes outside their subtree (applicable only to RPCs,
-                                          notifications, and actions) */
+                                          depends on nodes outside their subtree (applicable to RPCs,
+                                          notifications, actions) or outside their module (applicate to data) */
 #define LYS_DFLTJSON     0x1000       /**< default value (in ::lys_node_leaf, ::lys_node_leaflist, :lys_tpdf) was
                                           converted into JSON format, since it contains identityref value which is
                                           being used in JSON format (instead of module prefixes, we use the module
@@ -1715,7 +1686,7 @@ struct lys_node_case {
  * ::lys_node#iffeature_size is replaced by the #tpdf_size member and ::lys_node#iffeature is replaced by the #tpdf
  * member.
  *
- * Note, that the the inout nodes are always present in ::lys_node_rpc_action node as its input and output children
+ * Note, that the inout nodes are always present in ::lys_node_rpc_action node as its input and output children
  * nodes. If they are not specified explicitely in the schema, they are implicitly added to serve as possible target
  * of augments. These implicit elements can be recognised via #LYS_IMPLICIT bit in flags member of the input/output
  * node.
@@ -2291,6 +2262,15 @@ const struct lys_node *lys_getnext(const struct lys_node *last, const struct lys
                                             relevant if-feature conditions state */
 
 /**
+ * @brief Get next type of a union.
+ *
+ * @param[in] last Last returned type. NULL on first call.
+ * @param[in] type Union type structure.
+ * @return Next union type in order, NULL if all were returned or on error.
+ */
+const struct lys_type *lys_getnext_union_type(const struct lys_type *last, const struct lys_type *type);
+
+/**
  * @brief Search for schema nodes matching the provided path.
  *
  * Learn more about the path format at page @ref howtoxpath.
@@ -2299,8 +2279,7 @@ const struct lys_node *lys_getnext(const struct lys_node *last, const struct lys
  * @param[in] cur_module Current module name.
  * @param[in] cur_node Current (context) schema node.
  * @param[in] path Schema path expression filtering the matching nodes.
- * @return Set of found schema nodes. If no nodes are matching \p path the returned set is empty.
- * In case of an error, NULL is returned.
+ * @return Set of found schema nodes. In case of an error, NULL is returned.
  */
 struct ly_set *lys_find_path(const struct lys_module *cur_module, const struct lys_node *cur_node, const char *path);
 
@@ -2321,7 +2300,7 @@ enum lyxp_node_type {
 /**
  * @brief Get all the partial XPath nodes (atoms) that are required for \p expr to be evaluated.
  *
- * @param[in] ctx_node Context (current) schema node. Fake roots are distinguished using \p cur_snode_type
+ * @param[in] ctx_node Context (current) schema node. Fake roots are distinguished using \p ctx_node_type
  * and then this node can be any node from the module (so, for example, do not put node added by an augment from another module).
  * @param[in] ctx_node_type Context (current) schema node type. Most commonly is #LYXP_NODE_ELEM, but if
  * your context node is supposed to be the root, you can specify what kind of root it is.
@@ -2421,7 +2400,7 @@ struct lys_module *lys_main_module(const struct lys_module *module);
  * module.
  *
  * @param[in] mod Module to be searched.
- * @return The implemeneted revision of the module if any, the given module otherwise.
+ * @return The implemented revision of the module if any, the given module otherwise.
  */
 struct lys_module *lys_implemented_module(const struct lys_module *mod);
 
@@ -2535,6 +2514,21 @@ int lys_print_fd(int fd, const struct lys_module *module, LYS_OUTFORMAT format, 
  * @return 0 on success, 1 on failure (#ly_errno is set).
  */
 int lys_print_file(FILE *f, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
+                   int line_length, int options);
+
+/**
+ * @brief Print schema tree in the specified format into a file.
+ *
+ * @param[in] path File where to print the schema.
+ * @param[in] module Schema tree to print.
+ * @param[in] format Schema output format.
+ * @param[in] target_node Optional parameter. It specifies which particular node/subtree in the module will be printed.
+ * Only for #LYS_OUT_INFO and #LYS_OUT_TREE formats. Use fully qualified schema path (@ref howtoxpath).
+ * @param[in] line_length Maximum characters to be printed on a line, 0 for unlimited. Only for #LYS_OUT_TREE printer.
+ * @param[in] options Schema output options (see @ref schemaprinterflags).
+ * @return 0 on success, 1 on failure (#ly_errno is set).
+ */
+int lys_print_path(const char *path, const struct lys_module *module, LYS_OUTFORMAT format, const char *target_node,
                    int line_length, int options);
 
 /**

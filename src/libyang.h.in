@@ -117,12 +117,14 @@ extern "C" {
  *
  * When creating a new context, search dir can be specified (NULL is accepted) to provide directory
  * where libyang will automatically search for schemas being imported or included. The search path
- * can be later changed via ly_ctx_set_searchdir() and ly_ctx_unset_searchdrs() functions. If the search dir
- * is specified, it is explored first. Except the searchpath, also all its subdirectories (and symlinks) are
- * taken into account. In case the module is not found, libyang tries to find the (sub)module also in the current
- * working working directory. Note, that in this case only the current directory without any other subdirectory
- * is examined. This automatic searching can be completely avoided when the caller sets module searching callback
- * (#ly_module_imp_clb) via ly_ctx_set_module_imp_clb(), but both approaches can also be combined.
+ * can be later changed via ly_ctx_set_searchdir() and ly_ctx_unset_searchdirs() functions. Before the search dirs,
+ * also the current working directory is (non-recursively) searched. For the case of the explicitly set search
+ * dirs, also all their subdirectories (and symlinks) are taken into account. Searching in the current working
+ * directory can be avoided with context's #LY_CTX_DISABLE_SEARCHDIR_CWD option (or via ly_ctx_set_disable_searchdir_cwd()).
+ * Searching in all the context's search dirs (without removing them) can be avoided with the context's
+ * #LY_CTX_DISABLE_SEARCHDIRS option (or via ly_ctx_set_disable_searchdirs()). This automatic searching can be preceded
+ * by a custom  module searching callback (#ly_module_imp_clb) set via ly_ctx_set_module_imp_clb(). The algorithm of
+ * searching in search dirs is also available via API as lys_search_localfile() function.
  *
  * Schemas are added into the context using [parser functions](@ref howtoschemasparsers) - \b lys_parse_*().
  * In case of schemas, also ly_ctx_load_module() can be used - in that case the #ly_module_imp_clb or automatic
@@ -363,6 +365,9 @@ extern "C" {
  * The plugins list can be cleaned by ly_clean_plugins(). However, since various contexts (respectively their
  * schemas) can link to the plugins, the cleanup is successful only when there is no remaining context.
  *
+ * For both plugin types, when a specific plugin is being loaded, libyang checks for the API version the plugin was compiled with.
+ * From the plugin side, this is done using `LYEXT_VERSION_CHECK` or `LYTYPE_VERSION_CHECK` which must be defined in the plugin code.
+ *
  * @section extensions Extensions
  *
  * YANG provides extensions as a mechanism how to add new statements into the language. Since they are very generic -
@@ -371,7 +376,7 @@ extern "C" {
  * useful implementation. Therefore, you can reach some limitation regarding the extensions support, but the common
  * use cases should be covered and supported.
  *
- * Since libyang does not understand human text, it is not possible to get the complete defintion of the extension from
+ * Since libyang does not understand human text, it is not possible to get the complete definition of the extension from
  * its description statement. Therefore, libyang allows the schema authors to provide @link extplugins extension
  * plugin@endlink that provides information from the extension description to libyang.
  *
@@ -613,6 +618,7 @@ extern "C" {
  * - lys_print_mem()
  * - lys_print_fd()
  * - lys_print_file()
+ * - lys_print_path()
  * - lys_print_clb()
  */
 
@@ -677,7 +683,7 @@ extern "C" {
  * - JSON
  *
  *   The alternative data format available in RESTCONF protocol. Specification of JSON encoding of data modeled by YANG
- *   can be found in [this draft](https://tools.ietf.org/html/draft-ietf-netmod-yang-json-05).
+ *   can be found in [RFC 7951](http://tools.ietf.org/html/rfc7951).
  *
  * Besides the format of input data, the parser functions accepts additional [options](@ref parseroptions) to specify
  * how the input data should be processed.
@@ -769,7 +775,7 @@ extern "C" {
  * change is done on the data tree (via a combination of \b lyd_change_*(), \b lyd_insert*(), \b lyd_new*(),
  * lyd_unlink() and lyd_free() functions).
  *
- * Part of data validation is resolving leafrefs and instance-identifiers. Leafrefs are resolved only when a change occured
+ * Part of data validation is resolving leafrefs and instance-identifiers. Leafrefs are resolved only when a change occurred
  * in the data tree that could have broken the link. However, as instance-identifiers can point to any node whatsoever
  * without an import, it would not be effective to store metadata as in the case of leafrefs. That is why they are resolved
  * during every validation. Also, for the same reason, it can easily happen that when parsing/validating data with
@@ -876,6 +882,7 @@ extern "C" {
  * - lyd_print_mem()
  * - lyd_print_fd()
  * - lyd_print_file()
+ * - lyd_print_path()
  * - lyd_print_clb()
  */
 
@@ -1037,9 +1044,9 @@ extern "C" {
  * @page howtothreads libyang in Threads
  *
  * libyang can be used in multithreaded applications keeping in mind the following rules:
- * - libyang context manipulation (adding new schemas) is not thread safe and it is supposed to be done in a main
- *   thread before any other work with context, schemas or data instances. Destroying the context is supposed to
- *   be done when no other thread accesses context, schemas nor data trees,
+ * - libyang context manipulation (adding new schemas, removing schemas or even printing schemas) is not thread safe
+ *   and it is supposed to be done in a main thread before any other work with context, schemas or data instances.
+ *   Destroying the context is supposed to be done when no other thread accesses context, schemas nor data trees,
  * - data parser (\b lyd_parse*() functions) can be used simultaneously in multiple threads (also the returned
  *   #ly_errno is thread safe),
  * - data manipulation (lyd_new(), lyd_insert(), lyd_unlink(), lyd_free() and many other
@@ -1104,6 +1111,7 @@ extern "C" {
  */
 
 /**
+ * @struct ly_ctx
  * @brief libyang context handler.
  */
 struct ly_ctx;
@@ -1113,6 +1121,7 @@ struct ly_ctx;
  * @ingroup context
  *
  * Options to change context behavior.
+ * @{
  */
 
 #define LY_CTX_ALLIMPLEMENTED 0x01 /**< All the imports of the schema being parsed are treated implemented. */
@@ -1132,6 +1141,7 @@ struct ly_ctx;
 #define LY_CTX_DISABLE_SEARCHDIR_CWD 0x10 /**< Do not automatically search for schemas in current working
                                         directory, which is by default searched automatically (despite not
                                         recursively). */
+#define LY_CTX_PREFER_SEARCHDIRS 0x20 /**< When searching for schema, prefer searchdirs instead of user callback. */
 /**@} contextoptions */
 
 /**
@@ -1295,6 +1305,23 @@ void ly_ctx_set_disable_searchdir_cwd(struct ly_ctx *ctx);
 void ly_ctx_unset_disable_searchdir_cwd(struct ly_ctx *ctx);
 
 /**
+ * @brief Prefer context's searchdirs before the user callback (ly_module_imp_clb) provided via ly_ctx_set_module_imp_clb()).
+ *
+ * The same effect is achieved by using #LY_CTX_PREFER_SEARCHDIRS option when creating new context or parsing
+ * a specific schema.
+ *
+ * @param[in] ctx Context to be modified.
+ */
+void ly_ctx_set_prefer_searchdirs(struct ly_ctx *ctx);
+
+/**
+ * @brief Reverse function to ly_ctx_set_prefer_searchdirs().
+ *
+ * @param[in] ctx Context to be modified.
+ */
+void ly_ctx_unset_prefer_searchdirs(struct ly_ctx *ctx);
+
+/**
  * @brief Make context to set all the imported modules to be implemented. By default,
  * if the imported module is not used in leafref's path, augment or deviation, it is
  * imported and its data tree is not taken into account.
@@ -1435,9 +1462,11 @@ const struct lys_module *ly_ctx_load_module(struct ly_ctx *ctx, const char *name
  * @return Requested module data, NULL if the module is supposed to be loaded
  * using standard mechanisms (searched for in the filesystem), NULL and #ly_errno set if
  * the callback failed resulting in the module failing to load.
+ * If an @arg free_module_data callback is provided, it will be used to free the allegedly const data
+ * which were returned by this callback.
  */
-typedef char *(*ly_module_imp_clb)(const char *mod_name, const char *mod_rev, const char *submod_name, const char *sub_rev,
-                                   void *user_data, LYS_INFORMAT *format, void (**free_module_data)(void *model_data));
+typedef const char *(*ly_module_imp_clb)(const char *mod_name, const char *mod_rev, const char *submod_name, const char *sub_rev,
+                                   void *user_data, LYS_INFORMAT *format, void (**free_module_data)(void *model_data, void *user_data));
 
 /**
  * @brief Set missing include or import module callback. It is meant to be used when the models
@@ -1491,7 +1520,7 @@ void ly_ctx_set_module_data_clb(struct ly_ctx *ctx, ly_module_data_clb clb, void
  * @brief Get the missing data module calback.
  *
  * @param[in] ctx Context to read from.
- * @param[in] user_data Optional pointer for getting the user-supplied callbck data.
+ * @param[in] user_data Optional pointer for getting the user-supplied callback data.
  * @return Callback or NULL if not set.
  */
 ly_module_data_clb ly_ctx_get_module_data_clb(const struct ly_ctx *ctx, void **user_data);
@@ -2060,7 +2089,7 @@ LY_ERR *ly_errno_glob_address(void);
 LY_VECODE ly_vecode(const struct ly_ctx *ctx);
 
 /**
- * @brief Get the last (thread, context-specific) error message. If the coresponding module defined
+ * @brief Get the last (thread, context-specific) error message. If the corresponding module defined
  * a specific error message, it will be used instead the default one.
  *
  * Sometimes, the error message is extended with path of the element where the problem is.

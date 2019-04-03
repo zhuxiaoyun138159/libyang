@@ -5,17 +5,11 @@ __author__ = "Matija Amidzic <matija.amidzic@sartura.hr>"
 __copyright__ = "Copyright 2018, Deutsche Telekom AG"
 __license__ = "BSD 3-Clause"
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# This source code is licensed under BSD 3-Clause License (the "License").
+# You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#     https://opensource.org/licenses/BSD-3-Clause
 
 import yang as ly
 import unittest
@@ -548,6 +542,47 @@ class TestUM(unittest.TestCase):
             schema = set.schema()[0]
             path = schema.path(0)
             self.assertEqual(template, path)
+
+        except Exception as e:
+            self.fail(e)
+
+    def test_ly_module_data_instatiables(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+        module_name = "b"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+
+            module = ctx.load_module(module_name)
+            self.assertIsNotNone(module)
+            self.assertEqual(module_name, module.name())
+
+            instantiables = module.data_instantiables(0)
+            self.assertIsNotNone(instantiables)
+            self.assertEqual(1, len(instantiables))
+
+        except Exception as e:
+            self.fail(e)
+
+    def test_ly_schema_child_instatiables(self):
+        yang_folder = config.TESTS_DIR + "/api/files"
+        module_name = "b"
+
+        try:
+            ctx = ly.Context(yang_folder)
+            self.assertIsNotNone(ctx)
+
+            module = ctx.load_module(module_name)
+            self.assertIsNotNone(module)
+            self.assertEqual(module_name, module.name())
+
+            instantiables = module.data_instantiables(0)
+            self.assertIsNotNone(instantiables)
+            self.assertEqual(1, len(instantiables))
+            child_instantiables = instantiables[0].child_instantiables(0)
+            self.assertIsNotNone(child_instantiables)
+            self.assertEqual(3, len(child_instantiables))
 
         except Exception as e:
             self.fail(e)

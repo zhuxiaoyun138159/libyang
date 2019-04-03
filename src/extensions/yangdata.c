@@ -1,5 +1,5 @@
 /**
- * @file yang-data.c
+ * @file yangdata.c
  * @author Pavol Vican <vican.pavol@gmail.com>
  * @brief libyang extension plugin - YANG DATA (RFC 8040)
  *
@@ -21,8 +21,11 @@
 #include <stdlib.h>
 #include "../extensions.h"
 
-void lys_iffeature_free(struct ly_ctx *ctx, struct lys_iffeature *iffeature, uint8_t iffeature_size,
-                        void (*private_destructor)(const struct lys_node *node, void *priv));
+/**
+ * @brief Storage for ID used to check plugin API version compatibility.
+ */
+LYEXT_VERSION_CHECK
+
 int check_node(struct lys_node *node);
 
 /**
@@ -94,7 +97,7 @@ int check_node(struct lys_node *node) {
 
 void remove_iffeature(struct lys_iffeature **iffeature, uint8_t *iffeature_size, struct ly_ctx *ctx) {
 
-    lys_iffeature_free(ctx, *iffeature, *iffeature_size, NULL);
+    lys_iffeature_free(ctx, *iffeature, *iffeature_size, 0, NULL);
     *iffeature_size = 0;
     *iffeature = NULL;
 }

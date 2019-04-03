@@ -177,9 +177,9 @@ int lyp_ctx_check_module(struct lys_module *module);
 int lyp_ctx_add_module(struct lys_module *module);
 
 /**
- * @brief Add annotations definitions of attributes used in ietf-netconf RPCs.
+ * @brief Add annotations definitions of attributes and URL config used in ietf-netconf RPCs.
  */
-int lyp_add_ietf_netconf_annotations(struct lys_module *mod);
+int lyp_add_ietf_netconf_annotations_config(struct lys_module *mod);
 
 /**
  * @brief mmap() wrapper for parsers. To unmap, use lyp_munmap().
@@ -258,19 +258,19 @@ struct lyext_plugin *ext_get_plugin(const char *name, const char *module, const 
  *
  * @param[in] mod Module of the type.
  * @param[in] type_name Type (typedef) name.
- * @param[in] value_str Value to store as a string.
+ * @param[in,out] value_str Stored string value, can be overwritten by the user store callback.
  * @param[in,out] value Filled value to be overwritten by the user store callback.
  * @return 0 on successful storing, 1 if the type is not a user type, -1 on error.
  */
-int lytype_store(const struct lys_module *mod, const char *type_name, const char *value_str, lyd_val *value);
+int lytype_store(const struct lys_module *mod, const char *type_name, const char **value_str, lyd_val *value);
 
 /**
  * @brief Free a user type stored value.
  *
- * @param[in] mod Module of the type.
- * @param[in] type_name Type (typedef) name.
+ * @param[in] type Type of the value.
  * @param[in] value Value union to free.
+ * @param[in] value_str String value of the value.
  */
-void lytype_free(const struct lys_module *mod, const char *type_name, lyd_val value);
+void lytype_free(const struct lys_type *type, lyd_val value, const char *value_str);
 
 #endif /* LY_PARSER_H_ */

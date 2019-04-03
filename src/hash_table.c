@@ -62,25 +62,29 @@ void
 lydict_clean(struct dict_table *dict)
 {
     unsigned int i;
+    struct dict_rec *dict_rec  = NULL;
+    struct ht_rec *rec = NULL;
 
     if (!dict) {
         LOGARG;
         return;
     }
 
-    for (i = 0; i < dict->hash_tab->size; i++)
-    {
+    for (i = 0; i < dict->hash_tab->size; i++) {
         /* get ith record */
-        struct ht_rec *rec = (struct ht_rec *)&dict->hash_tab->recs[i * dict->hash_tab->rec_size];
+        rec = (struct ht_rec *)&dict->hash_tab->recs[i * dict->hash_tab->rec_size];
         if (rec->hits == 1) {
             /*
              * this should not happen, all records inserted into
              * dictionary are supposed to be removed using lydict_remove()
              * before calling lydict_clean()
              */
-            assert(!(rec->hits == 1));
+            dict_rec  = (struct dict_rec *)rec->val;
+            LOGWRN(NULL, "String \"%s\" not freed from the dictionary, refcount %d", dict_rec->value, dict_rec->refcount);
             /* if record wasn't removed before free string allocated for that record */
-            free(((struct dict_rec *)rec->val)->value);
+#ifdef NDEBUG
+            free(dict_rec->value);
+#endif
         }
     }
 
@@ -262,7 +266,7 @@ lydict_insert_zc(struct ly_ctx *ctx, char *value)
     return result;
 }
 
-static struct ht_rec *
+struct ht_rec *
 lyht_get_rec(unsigned char *recs, uint16_t rec_size, uint32_t idx)
 {
     return (struct ht_rec *)&recs[idx * rec_size];

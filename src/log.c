@@ -280,7 +280,7 @@ ly_log_dbg(int group, const char *format, ...)
 
 #endif
 
-void
+API void
 lyext_log(const struct ly_ctx *ctx, LY_LOG_LEVEL level, const char *plugin, const char *function, const char *format, ...)
 {
     va_list ap;
@@ -369,7 +369,7 @@ const char *ly_errs[] = {
 /* LYE_INWHEN */       "Irresolvable when condition \"%s\".",
 /* LYE_NOMIN */        "Too few \"%s\" elements.",
 /* LYE_NOMAX */        "Too many \"%s\" elements.",
-/* LYE_NOREQINS */     "Required instance of \"%s\" does not exists.",
+/* LYE_NOREQINS */     "Required instance of \"%s\" does not exist.",
 /* LYE_NOLEAFREF */    "Leafref \"%s\" of value \"%s\" points to a non-existing leaf.",
 /* LYE_NOMANDCHOICE */ "Mandatory choice \"%s\" missing a case branch.",
 
@@ -519,7 +519,7 @@ ly_vlog_build_path_print(char **path, uint16_t *index, const char *str, uint16_t
 }
 
 int
-ly_vlog_build_path(enum LY_VLOG_ELEM elem_type, const void *elem, char **path, int schema_all_prefixes)
+ly_vlog_build_path(enum LY_VLOG_ELEM elem_type, const void *elem, char **path, int schema_all_prefixes, int data_no_predicates)
 {
     int i, j, yang_data_extension = 0;
     struct lys_node_list *slist;
@@ -544,12 +544,14 @@ ly_vlog_build_path(enum LY_VLOG_ELEM elem_type, const void *elem, char **path, i
             elem = ((struct lyxml_elem *)elem)->parent;
             break;
         case LY_VLOG_LYS:
-            if (!top_smodule && !schema_all_prefixes) {
+            if (!top_smodule) {
                 /* remember the top module, it will act as the current module */
-                top_smodule = lys_node_module((struct lys_node *)elem);
+                for (sparent = (struct lys_node *)elem; lys_parent(sparent); sparent = lys_parent(sparent));
+                top_smodule = lys_node_module(sparent);
             }
 
-            if (!((struct lys_node *)elem)->parent || lys_node_module((struct lys_node *)elem) != top_smodule) {
+            if (!((struct lys_node *)elem)->parent || (lys_node_module((struct lys_node *)elem) != top_smodule)
+                    || schema_all_prefixes) {
                 prefix = lys_node_module((struct lys_node *)elem)->name;
             } else {
                 prefix = NULL;
@@ -607,106 +609,108 @@ ly_vlog_build_path(enum LY_VLOG_ELEM elem_type, const void *elem, char **path, i
             }
 
             /* handle predicates (keys) in case of lists */
-            if (((struct lyd_node *)elem)->schema->nodetype == LYS_LIST) {
-                dlist = (struct lyd_node *)elem;
-                slist = (struct lys_node_list *)((struct lyd_node *)elem)->schema;
-                if (slist->keys_size) {
-                    /* schema list with keys - use key values in predicates */
-                    for (i = slist->keys_size - 1; i > -1; i--) {
-                        LY_TREE_FOR(dlist->child, diter) {
-                            if (diter->schema == (struct lys_node *)slist->keys[i]) {
-                                break;
-                            }
-                        }
-                        if (diter && ((struct lyd_node_leaf_list *)diter)->value_str) {
-                            if (strchr(((struct lyd_node_leaf_list *)diter)->value_str, '\'')) {
-                                val_start = "=\"";
-                                val_end = "\"]";
-                            } else {
-                                val_start = "='";
-                                val_end = "']";
-                            }
-
-                            /* print value */
-                            if (ly_vlog_build_path_print(path, &index, val_end, 2, &length)) {
-                                return -1;
-                            }
-                            len = strlen(((struct lyd_node_leaf_list *)diter)->value_str);
-                            if (ly_vlog_build_path_print(path, &index,
-                                    ((struct lyd_node_leaf_list *)diter)->value_str, len, &length)) {
-                                return -1;
-                            }
-
-                            /* print schema name */
-                            if (ly_vlog_build_path_print(path, &index, val_start, 2, &length)) {
-                                return -1;
-                            }
-                            len = strlen(diter->schema->name);
-                            if (ly_vlog_build_path_print(path, &index, diter->schema->name, len, &length)) {
-                                return -1;
-                            }
-
-                            if (lyd_node_module(dlist) != lyd_node_module(diter)) {
-                                if (ly_vlog_build_path_print(path, &index, ":", 1, &length)) {
-                                    return -1;
-                                }
-                                len = strlen(lyd_node_module(diter)->name);
-                                if (ly_vlog_build_path_print(path, &index, lyd_node_module(diter)->name, len, &length)) {
-                                    return -1;
+            if (!data_no_predicates) {
+                if (((struct lyd_node *)elem)->schema->nodetype == LYS_LIST) {
+                    dlist = (struct lyd_node *)elem;
+                    slist = (struct lys_node_list *)((struct lyd_node *)elem)->schema;
+                    if (slist->keys_size) {
+                        /* schema list with keys - use key values in predicates */
+                        for (i = slist->keys_size - 1; i > -1; i--) {
+                            LY_TREE_FOR(dlist->child, diter) {
+                                if (diter->schema == (struct lys_node *)slist->keys[i]) {
+                                    break;
                                 }
                             }
+                            if (diter && ((struct lyd_node_leaf_list *)diter)->value_str) {
+                                if (strchr(((struct lyd_node_leaf_list *)diter)->value_str, '\'')) {
+                                    val_start = "=\"";
+                                    val_end = "\"]";
+                                } else {
+                                    val_start = "='";
+                                    val_end = "']";
+                                }
 
-                            if (ly_vlog_build_path_print(path, &index, "[", 1, &length)) {
-                                return -1;
+                                /* print value */
+                                if (ly_vlog_build_path_print(path, &index, val_end, 2, &length)) {
+                                    return -1;
+                                }
+                                len = strlen(((struct lyd_node_leaf_list *)diter)->value_str);
+                                if (ly_vlog_build_path_print(path, &index,
+                                        ((struct lyd_node_leaf_list *)diter)->value_str, len, &length)) {
+                                    return -1;
+                                }
+
+                                /* print schema name */
+                                if (ly_vlog_build_path_print(path, &index, val_start, 2, &length)) {
+                                    return -1;
+                                }
+                                len = strlen(diter->schema->name);
+                                if (ly_vlog_build_path_print(path, &index, diter->schema->name, len, &length)) {
+                                    return -1;
+                                }
+
+                                if (lyd_node_module(dlist) != lyd_node_module(diter)) {
+                                    if (ly_vlog_build_path_print(path, &index, ":", 1, &length)) {
+                                        return -1;
+                                    }
+                                    len = strlen(lyd_node_module(diter)->name);
+                                    if (ly_vlog_build_path_print(path, &index, lyd_node_module(diter)->name, len, &length)) {
+                                        return -1;
+                                    }
+                                }
+
+                                if (ly_vlog_build_path_print(path, &index, "[", 1, &length)) {
+                                    return -1;
+                                }
                             }
                         }
-                    }
-                } else {
-                    /* schema list without keys - use instance position */
-                    i = j = lyd_list_pos(dlist);
-                    len = 1;
-                    while (j > 9) {
-                        ++len;
-                        j /= 10;
-                    }
+                    } else {
+                        /* schema list without keys - use instance position */
+                        i = j = lyd_list_pos(dlist);
+                        len = 1;
+                        while (j > 9) {
+                            ++len;
+                            j /= 10;
+                        }
 
-                    if (ly_vlog_build_path_print(path, &index, "]", 1, &length)) {
-                        return -1;
-                    }
+                        if (ly_vlog_build_path_print(path, &index, "]", 1, &length)) {
+                            return -1;
+                        }
 
-                    str = malloc(len + 1);
-                    LY_CHECK_ERR_RETURN(!str, LOGMEM(NULL), -1);
-                    sprintf(str, "%d", i);
+                        str = malloc(len + 1);
+                        LY_CHECK_ERR_RETURN(!str, LOGMEM(NULL), -1);
+                        sprintf(str, "%d", i);
 
-                    if (ly_vlog_build_path_print(path, &index, str, len, &length)) {
+                        if (ly_vlog_build_path_print(path, &index, str, len, &length)) {
+                            free(str);
+                            return -1;
+                        }
                         free(str);
+
+                        if (ly_vlog_build_path_print(path, &index, "[", 1, &length)) {
+                            return -1;
+                        }
+                    }
+                } else if (((struct lyd_node *)elem)->schema->nodetype == LYS_LEAFLIST &&
+                        ((struct lyd_node_leaf_list *)elem)->value_str) {
+                    if (strchr(((struct lyd_node_leaf_list *)elem)->value_str, '\'')) {
+                        val_start = "[.=\"";
+                        val_end = "\"]";
+                    } else {
+                        val_start = "[.='";
+                        val_end = "']";
+                    }
+
+                    if (ly_vlog_build_path_print(path, &index, val_end, 2, &length)) {
                         return -1;
                     }
-                    free(str);
-
-                    if (ly_vlog_build_path_print(path, &index, "[", 1, &length)) {
+                    len = strlen(((struct lyd_node_leaf_list *)elem)->value_str);
+                    if (ly_vlog_build_path_print(path, &index, ((struct lyd_node_leaf_list *)elem)->value_str, len, &length)) {
                         return -1;
                     }
-                }
-            } else if (((struct lyd_node *)elem)->schema->nodetype == LYS_LEAFLIST &&
-                    ((struct lyd_node_leaf_list *)elem)->value_str) {
-                if (strchr(((struct lyd_node_leaf_list *)elem)->value_str, '\'')) {
-                    val_start = "[.=\"";
-                    val_end = "\"]";
-                } else {
-                    val_start = "[.='";
-                    val_end = "']";
-                }
-
-                if (ly_vlog_build_path_print(path, &index, val_end, 2, &length)) {
-                    return -1;
-                }
-                len = strlen(((struct lyd_node_leaf_list *)elem)->value_str);
-                if (ly_vlog_build_path_print(path, &index, ((struct lyd_node_leaf_list *)elem)->value_str, len, &length)) {
-                    return -1;
-                }
-                if (ly_vlog_build_path_print(path, &index, val_start, 4, &length)) {
-                    return -1;
+                    if (ly_vlog_build_path_print(path, &index, val_start, 4, &length)) {
+                        return -1;
+                    }
                 }
             }
 
@@ -796,7 +800,7 @@ ly_vlog(const struct ly_ctx *ctx, LY_ECODE ecode, enum LY_VLOG_ELEM elem_type, c
                 /* top-level */
                 path = strdup("/");
             } else {
-                ly_vlog_build_path(elem_type, elem, &path, 0);
+                ly_vlog_build_path(elem_type, elem, &path, 0, 0);
             }
         }
     }
@@ -817,6 +821,43 @@ ly_vlog(const struct ly_ctx *ctx, LY_ECODE ecode, enum LY_VLOG_ELEM elem_type, c
         break;
     }
     va_end(ap);
+}
+
+void
+ly_vlog_str(const struct ly_ctx *ctx, enum LY_VLOG_ELEM elem_type, const char *str, ...)
+{
+    va_list ap;
+    char *path = NULL, *fmt, *ptr;
+    const struct ly_err_item *first;
+
+    assert((elem_type == LY_VLOG_NONE) || (elem_type == LY_VLOG_PREV));
+
+    if (elem_type == LY_VLOG_PREV) {
+        /* use previous path */
+        first = ly_err_first(ctx);
+        if (first && first->prev->path) {
+            path = strdup(first->prev->path);
+        }
+    }
+
+    if (strchr(str, '%')) {
+        /* must be enough */
+        fmt = malloc(2 * strlen(str) + 1);
+        strcpy(fmt, str);
+        for (ptr = strchr(fmt, '%'); ptr; ptr = strchr(ptr + 2, '%')) {
+            memmove(ptr + 1, ptr, strlen(ptr) + 1);
+            ptr[0] = '%';
+        }
+    } else {
+        fmt = strdup(str);
+    }
+
+    va_start(ap, str);
+    /* path is spent and should not be freed! */
+    log_vprintf(ctx, LY_LLERR, LY_EVALID, LYVE_SUCCESS, path, fmt, ap);
+    va_end(ap);
+
+    free(fmt);
 }
 
 API void

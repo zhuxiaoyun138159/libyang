@@ -117,7 +117,7 @@ jsons_print_config(struct lyout *out, uint16_t flags, int *first)
 static void
 jsons_print_mand(struct lyout *out, uint16_t flags, int *first)
 {
-    const char *str;
+    const char *str = NULL;
 
     if (flags & LYS_MAND_MASK) {
         if (flags & LYS_MAND_TRUE) {
@@ -227,6 +227,7 @@ jsons_print_type_(struct lyout *out, const struct lys_type *type, int with_label
     unsigned int i;
     int f;
     struct lys_module *mod;
+    struct lys_node *node;
 
     if (!type) {
         return;
@@ -332,7 +333,13 @@ int_range:
         break;
     case LY_TYPE_LEAFREF:
         ly_print(out, "\"basetype\":\"leafref\"");
-        jsons_print_text(out, "path", "value", type->info.lref.path, 1, NULL);
+        jsons_print_text(out, "path", "value", type->info.lref.path, 0, NULL);
+        for (node = (struct lys_node*)type->info.lref.target; node && node->parent; node = lys_parent(node));
+        if (node) {
+            mod = node->module;
+            ly_print(out, ",\"target-schema\":\"%s%s%s\"", mod->name, mod->rev_size ? "@" : "", mod->rev_size ? mod->rev[0].date : "");
+        }
+        ly_print(out, "}");
         if (type->info.lref.req) {
             jsons_print_object(out, "require-instance", "value", type->info.lref.req == -1 ? "false" : "true", 1, NULL);
         }
@@ -1085,6 +1092,11 @@ static void
 jsons_print_anydata(struct lyout *out, const struct lys_node *node, int *first)
 {
     struct lys_node_anydata *any = (struct lys_node_anydata *)node;
+
+    if (!lys_parent(node) && !strcmp(node->name, "config") && !strcmp(node->module->name, "ietf-netconf")) {
+        /* node added by libyang, not actually in the model */
+        return;
+    }
 
     jsons_print_object(out, node->name, "nodetype", jsons_nodetype_str(node->nodetype), 0, first);
     ly_print(out, ",\"module\":\"%s\"", lys_main_module(node->module)->name);

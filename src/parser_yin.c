@@ -248,6 +248,10 @@ lyp_yin_parse_subnode_ext(struct lys_module *mod, void *elem, LYEXT_PAR elem_typ
     }
 
     LY_TREE_FOR_SAFE(yin->child, next, child) {
+        if (!child->ns) {
+            LOGVAL(mod->ctx, LYE_SPEC, LY_VLOG_NONE, NULL, "Extension instance \"%s\" is missing namespace.", child->name);
+            return EXIT_FAILURE;
+        }
         if (!strcmp(child->ns->value, LY_NSYIN)) {
             /* skip the regular YIN nodes */
             continue;
@@ -673,9 +677,8 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
         LY_CHECK_ERR_GOTO(!type->info.bits.bit, LOGMEM(ctx), error);
 
         p = 0;
-        i = -1;
+        i = 0;
         LY_TREE_FOR(yin->child, next) {
-            i++;
             c_ftrs = 0;
 
             GETVAL(ctx, value, next, "name");
@@ -847,6 +850,8 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
                 memcpy(&type->info.bits.bit[j - 1], &bit, sizeof bit);
                 j--;
             }
+
+            ++i;
         }
         break;
 
@@ -967,9 +972,8 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
         LY_CHECK_ERR_GOTO(!type->info.enums.enm, LOGMEM(ctx), error);
 
         v = 0;
-        i = -1;
+        i = 0;
         LY_TREE_FOR(yin->child, next) {
-            i++;
             c_ftrs = 0;
 
             GETVAL(ctx, value, next, "name");
@@ -1147,6 +1151,7 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
                 }
             }
 
+            ++i;
         }
         break;
 
@@ -2185,6 +2190,7 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
     struct unres_schema tmp_unres;
     struct lys_module *mod;
     void *reallocated;
+    size_t deviate_must_index;
 
     GETVAL(ctx, value, yin, "target-node");
     dev->target_name = transform_schema2json(module, value);
@@ -2726,10 +2732,10 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
                 goto error;
             } else if (d->mod == LY_DEVIATE_ADD) {
                 /* reallocate the must array of the target */
-                d->must = ly_realloc(*trg_must, (c_must + *trg_must_size) * sizeof *d->must);
-                LY_CHECK_ERR_GOTO(!d->must, LOGMEM(ctx), error);
-                *trg_must = d->must;
-                d->must = &((*trg_must)[*trg_must_size]);
+                struct lys_restr *must = ly_realloc(*trg_must, (c_must + *trg_must_size) * sizeof *d->must);
+                LY_CHECK_ERR_GOTO(!must, LOGMEM(ctx), error);
+                *trg_must = must;
+                d->must = calloc(c_must, sizeof *d->must);
                 d->must_size = c_must;
             } else { /* LY_DEVIATE_DEL */
                 d->must = calloc(c_must, sizeof *d->must);
@@ -2823,6 +2829,7 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
         }
 
         /* process deviation properties with 0..n cardinality */
+        deviate_must_index = 0;
         LY_TREE_FOR_SAFE(develem->child, next2, child) {
             if (strcmp(child->ns->value, LY_NSYIN)) {
                 /* extension */
@@ -2878,6 +2885,8 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
                     if (fill_yin_must(module, child, &((*trg_must)[*trg_must_size]), unres)) {
                         goto error;
                     }
+                    memcpy(d->must + deviate_must_index, &((*trg_must)[*trg_must_size]), sizeof *d->must);
+                    ++deviate_must_index;
                     (*trg_must_size)++;
                 }
 
@@ -4133,7 +4142,7 @@ read_yin_case(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -4287,7 +4296,7 @@ read_yin_choice(struct lys_module *module, struct lys_node *parent, struct lyxml
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -4493,7 +4502,7 @@ read_yin_anydata(struct lys_module *module, struct lys_node *parent, struct lyxm
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -4653,7 +4662,7 @@ read_yin_leaf(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -4877,7 +4886,7 @@ read_yin_leaflist(struct lys_module *module, struct lys_node *parent, struct lyx
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -5194,7 +5203,7 @@ read_yin_list(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -5567,7 +5576,7 @@ read_yin_container(struct lys_module *module, struct lys_node *parent, struct ly
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -5779,7 +5788,7 @@ read_yin_grouping(struct lys_module *module, struct lys_node *parent, struct lyx
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -5930,7 +5939,7 @@ read_yin_input_output(struct lys_module *module, struct lys_node *parent, struct
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -6097,7 +6106,7 @@ read_yin_notif(struct lys_module *module, struct lys_node *parent, struct lyxml_
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -6287,7 +6296,7 @@ read_yin_rpc_action(struct lys_module *module, struct lys_node *parent, struct l
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
@@ -6438,7 +6447,7 @@ read_yin_uses(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     LOGDBG(LY_LDGYIN, "parsing %s statement \"%s\"", yin->name, retval->name);
 
     /* insert the node into the schema tree */
-    if (lys_node_addchild(parent, lys_main_module(module), retval)) {
+    if (lys_node_addchild(parent, lys_main_module(module), retval, options)) {
         goto error;
     }
 
