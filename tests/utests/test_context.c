@@ -12,6 +12,8 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
+#define _GNU_SOURCE
+
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
@@ -21,33 +23,41 @@
 #include <stdio.h>
 
 #include "common.h"
+#include "compat.h"
 #include "context.h"
 #include "parser.h"
+#include "set.h"
 #include "tests/config.h"
 #include "tree_schema_internal.h"
 
-#define BUFSIZE 1024
-char logbuf[BUFSIZE] = {0};
+struct ly_set logbuf = {0};
 int store = -1; /* negative for infinite logging, positive for limited logging */
 
 /* set to 0 to printing error messages to stderr instead of checking them in code */
 #define ENABLE_LOGGER_CHECKING 1
 
+#if ENABLE_LOGGER_CHECKING
 static void
 logger(LY_LOG_LEVEL level, const char *msg, const char *path)
 {
     (void) level; /* unused */
+    char *buffer = NULL;
+
     if (store) {
         if (path && path[0]) {
-            snprintf(logbuf, BUFSIZE - 1, "%s %s", msg, path);
+            if (asprintf(&buffer, "%s %s", msg, path) == -1) {
+                return;
+            }
         } else {
-            strncpy(logbuf, msg, BUFSIZE - 1);
+            buffer = strdup(msg);
         }
         if (store > 0) {
             --store;
         }
+        ly_set_add(&logbuf, buffer, 0);
     }
 }
+#endif
 
 static int
 logger_setup(void **state)
@@ -65,16 +75,35 @@ logger_teardown(void **state)
     (void) state; /* unused */
 #if ENABLE_LOGGER_CHECKING
     if (*state) {
-        fprintf(stderr, "%s\n", logbuf);
+        for (uint32_t i = logbuf.count; i > 0; i--) {
+            fprintf(stderr, "%s\n", (char*)logbuf.objs[i - 1]);
+        }
     }
+    ly_set_erase(&logbuf, free);
 #endif
     return 0;
 }
 
+void
+logbuf_clean(void)
+{
+    ly_set_clean(&logbuf, free);
+}
+
 #if ENABLE_LOGGER_CHECKING
-#   define logbuf_assert(str) assert_string_equal(logbuf, str)
+#define logbuf_assert(STR) \
+    assert_true(logbuf.count >= 1); \
+    assert_string_equal(logbuf.objs[logbuf.count - 1], STR); \
+    logbuf_clean()
+
+#define logbuf_assert2(STR1, STR2) \
+    assert_true(logbuf.count >= 2); \
+    assert_string_equal(logbuf.objs[logbuf.count - 1], STR1); \
+    assert_string_equal(logbuf.objs[logbuf.count - 2], STR2); \
+    logbuf_clean()
 #else
-#   define logbuf_assert(str)
+#define logbuf_assert(str)
+#define logbuf_assert2(str1, str2)
 #endif
 
 static void
@@ -287,7 +316,7 @@ test_models(void **state)
     assert_int_equal(LY_SUCCESS, ly_in_new_memory("module x {namespace urn:x;prefix x;}", &in));
     assert_int_equal(LY_EINVAL, lys_parse_mem_module(ctx, in, 4, 1, NULL, NULL, &mod1));
     ly_in_free(in, 0);
-    logbuf_assert("Invalid schema input format.");
+    logbuf_assert2("Parsing module failed.", "Invalid schema input format.");
 
     /* import callback */
     ly_ctx_set_module_imp_clb(ctx, test_imp_clb, (void*)(str = "test"));
@@ -305,7 +334,7 @@ test_models(void **state)
     assert_int_equal(LY_SUCCESS, ly_in_new_memory("module y {namespace urn:y;prefix y;include y;}", &in));
     assert_int_equal(LY_EVALID, lys_parse_mem_module(ctx, in, LYS_IN_YANG, 1, NULL, NULL, &mod1));
     ly_in_free(in, 0);
-    logbuf_assert("Name collision between module and submodule of name \"y\". Line number 1.");
+    logbuf_assert2("Parsing module \"y\" failed.", "Name collision between module and submodule of name \"y\". Line number 1.");
 
     assert_int_equal(LY_SUCCESS, ly_in_new_memory("module a {namespace urn:a;prefix a;include y;revision 2018-10-30; }", &in));
     assert_int_equal(LY_SUCCESS, lys_parse_mem_module(ctx, in, LYS_IN_YANG, 1, NULL, NULL, &mod1));
@@ -313,7 +342,7 @@ test_models(void **state)
     assert_int_equal(LY_SUCCESS, ly_in_new_memory("module y {namespace urn:y;prefix y;}", &in));
     assert_int_equal(LY_EVALID, lys_parse_mem_module(ctx, in, LYS_IN_YANG, 1, NULL, NULL, &mod1));
     ly_in_free(in, 0);
-    logbuf_assert("Name collision between module and submodule of name \"y\". Line number 1.");
+    logbuf_assert2("Parsing module \"y\" failed.", "Name collision between module and submodule of name \"y\". Line number 1.");
 
     store = 1;
     ly_ctx_set_module_imp_clb(ctx, test_imp_clb, "submodule y {belongs-to b {prefix b;}}");
@@ -345,7 +374,7 @@ test_models(void **state)
     /* mod1->parsed is necessary to compile mod2 because of possible groupings, typedefs, ... */
     ly_ctx_set_module_imp_clb(ctx, NULL, NULL);
     assert_int_equal(LY_ENOTFOUND, lys_compile(&mod2, 0));
-    logbuf_assert("Unable to reload \"w\" module to import it into \"z\", source data not found.");
+    logbuf_assert2("Compiling module \"z\" failed.", "Unable to reload \"w\" module to import it into \"z\", source data not found.");
     assert_null(mod2);
 
     assert_int_equal(LY_SUCCESS, ly_in_new_memory("module z {namespace urn:z;prefix z;import w {prefix w;revision-date 2018-10-24;}}", &in));
@@ -459,10 +488,10 @@ test_get_models(void **state)
     assert_int_equal(LY_SUCCESS, lys_parse_mem_module(ctx, in1, LYS_IN_YANG, 1, NULL, NULL, &mod));
     /* invalid attempts - implementing module of the same name and inserting the same module */
     assert_int_equal(LY_EDENIED, lys_parse_mem_module(ctx, in2, LYS_IN_YANG, 1, NULL, NULL, NULL));
-    logbuf_assert("Module \"a\" is already implemented in the context.");
+    logbuf_assert2("Parsing module \"a\" failed.", "Module \"a\" is already implemented in the context.");
     ly_in_reset(in1);
     assert_int_equal(LY_EEXIST, lys_parse_mem_module(ctx, in1, LYS_IN_YANG, 0, NULL, NULL, NULL));
-    logbuf_assert("Module \"a\" of revision \"2018-10-23\" is already present in the context.");
+    logbuf_assert2("Parsing module \"a\" failed.", "Module \"a\" of revision \"2018-10-23\" is already present in the context.");
     /* insert the second module only as imported, not implemented */
     ly_in_reset(in2);
     assert_int_equal(LY_SUCCESS, lys_parse_mem_module(ctx, in2, LYS_IN_YANG, 0, NULL, NULL, &mod2));
@@ -481,7 +510,7 @@ test_get_models(void **state)
     ly_in_free(in1, 0);
     assert_int_equal(LY_SUCCESS, ly_in_new_memory(str1, &in1));
     assert_int_equal(LY_EINVAL, lys_parse_mem_module(ctx, in1, LYS_IN_YANG, 1, NULL, NULL, &mod));
-    logbuf_assert("Input data contains submodule which cannot be parsed directly without its main module.");
+    logbuf_assert2("Parsing module failed.", "Input data contains submodule which cannot be parsed directly without its main module.");
 
     while ((mod = (struct lys_module *)ly_ctx_get_module_iter(ctx, &index))) {
         assert_string_equal(names[index - 1], mod->name);

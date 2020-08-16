@@ -12,6 +12,8 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
+#define _GNU_SOURCE
+
 #include "test_schema.h"
 
 #include <stdarg.h>
@@ -20,32 +22,39 @@
 #include <setjmp.h>
 #include <cmocka.h>
 
+#include <stdio.h>
 #include <string.h>
 
 #include "log.h"
+#include "set.h"
 #include "parser_schema.h"
 #include "tests/config.h"
 #include "tree_schema.h"
 
+struct ly_set logbuf = {0};
+
 #if ENABLE_LOGGER_CHECKING
 
-#define BUFSIZE 1024
-char logbuf[BUFSIZE] = {0};
 int store = -1; /* negative for infinite logging, positive for limited logging */
 
 static void
 logger(LY_LOG_LEVEL level, const char *msg, const char *path)
 {
     (void) level; /* unused */
+    char *buffer = NULL;
+
     if (store) {
         if (path && path[0]) {
-            snprintf(logbuf, BUFSIZE - 1, "%s %s", msg, path);
+            if (asprintf(&buffer, "%s %s", msg, path) == -1) {
+                return;
+            }
         } else {
-            strncpy(logbuf, msg, BUFSIZE - 1);
+            buffer = strdup(msg);
         }
         if (store > 0) {
             --store;
         }
+        ly_set_add(&logbuf, buffer, 0);
     }
 }
 #endif
@@ -54,12 +63,9 @@ static int
 logger_setup(void **state)
 {
     (void) state; /* unused */
-
 #if ENABLE_LOGGER_CHECKING
-    /* setup logger */
     ly_set_log_clb(logger, 1);
 #endif
-
     return 0;
 }
 
@@ -69,8 +75,11 @@ logger_teardown(void **state)
     (void) state; /* unused */
 #if ENABLE_LOGGER_CHECKING
     if (*state) {
-        fprintf(stderr, "%s\n", logbuf);
+        for (uint32_t i = logbuf.count; i > 0; i--) {
+            fprintf(stderr, "%s\n", (char*)logbuf.objs[i - 1]);
+        }
     }
+    ly_set_erase(&logbuf, free);
 #endif
     return 0;
 }
@@ -78,9 +87,7 @@ logger_teardown(void **state)
 void
 logbuf_clean(void)
 {
-#if ENABLE_LOGGER_CHECKING
-    logbuf[0] = '\0';
-#endif
+    ly_set_clean(&logbuf, free);
 }
 
 LY_ERR

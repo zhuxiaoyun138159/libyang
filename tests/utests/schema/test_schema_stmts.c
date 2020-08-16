@@ -85,8 +85,9 @@ test_identity(void **state)
     assert_string_equal(mod->parsed->identities[0].name, "ident-name");
 
     /* invalid substatement */
-    TEST_SCHEMA_ERR(ctx, 0, 1, "inv", "<identity name=\"ident-name\"><if-feature name=\"iff\"/></identity>",
-                    "Invalid sub-elemnt \"if-feature\" of \"identity\" element - this sub-element is allowed only in modules with version 1.1 or newer. Line number 1.");
+    TEST_SCHEMA_ERR2(ctx, 0, 1, "inv", "<identity name=\"ident-name\"><if-feature name=\"iff\"/></identity>",
+                     "Parsing module \"inv\" failed.",
+                     "Invalid sub-elemnt \"if-feature\" of \"identity\" element - this sub-element is allowed only in modules with version 1.1 or newer. Line number 1.");
 
     /*
      * compiling
@@ -117,15 +118,19 @@ test_identity(void **state)
     assert_int_equal(1, LY_ARRAY_COUNT(mod->compiled->identities[1].derived));
     assert_ptr_equal(mod->compiled->identities[1].derived[0], &mod->compiled->identities[0]);
 
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "identity i1;identity i1;", "Duplicate identifier \"i1\" of identity statement. /inv:{identity='i1'}");
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "identity i1;identity i1;", "Compiling module \"inv\" failed.",
+                     "Duplicate identifier \"i1\" of identity statement. /inv:{identity='i1'}");
 
     ly_ctx_set_module_imp_clb(ctx, test_imp_clb, "submodule inv_sub {belongs-to inv {prefix inv;} identity i1;}");
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "include inv_sub;identity i1;",
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "include inv_sub;identity i1;", "Compiling module \"inv\" failed.",
                     "Duplicate identifier \"i1\" of identity statement. /inv:{identity='i1'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0,"inv", "identity i1 {base i2;}", "Unable to find base (i2) of identity \"i1\". /inv:{identity='i1'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0,"inv", "identity i1 {base i1;}", "Identity \"i1\" is derived from itself. /inv:{identity='i1'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0,"inv", "identity i1 {base i2;}identity i2 {base i3;}identity i3 {base i1;}",
-                    "Identity \"i1\" is indirectly derived from itself. /inv:{identity='i3'}");
+    TEST_SCHEMA_ERR2(ctx, 0, 0,"inv", "identity i1 {base i2;}", "Compiling module \"inv\" failed.",
+                     "Unable to find base (i2) of identity \"i1\". /inv:{identity='i1'}");
+    TEST_SCHEMA_ERR2(ctx, 0, 0,"inv", "identity i1 {base i1;}", "Compiling module \"inv\" failed.",
+                     "Identity \"i1\" is derived from itself. /inv:{identity='i1'}");
+    TEST_SCHEMA_ERR2(ctx, 0, 0,"inv", "identity i1 {base i2;}identity i2 {base i3;}identity i3 {base i1;}",
+                     "Compiling module \"inv\" failed.",
+                     "Identity \"i1\" is indirectly derived from itself. /inv:{identity='i3'}");
 
     /* base in non-implemented module */
     ly_ctx_set_module_imp_clb(ctx, test_imp_clb,
@@ -133,14 +138,16 @@ test_identity(void **state)
     TEST_SCHEMA_OK(ctx, 0, 0, "ident", "import base {prefix b;} identity ii {base b:i1;}", mod);
 
     /* default value from non-implemented module */
-    TEST_SCHEMA_ERR(ctx, 0, 0, "ident2", "import base {prefix b;} leaf l {type identityref {base b:i1;} default b:i2;}",
-                    "Invalid leaf's default value \"b:i2\" which does not fit the type (Invalid identityref \"b:i2\" value"
-                    " - identity found in non-implemented module \"base\".). /ident2:l");
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "ident2", "import base {prefix b;} leaf l {type identityref {base b:i1;} default b:i2;}",
+                     "Compiling module \"ident2\" failed.",
+                     "Invalid leaf's default value \"b:i2\" which does not fit the type (Invalid identityref \"b:i2\" value"
+                     " - identity found in non-implemented module \"base\".). /ident2:l");
 
     /* default value in typedef from non-implemented module */
-    TEST_SCHEMA_ERR(ctx, 0, 0, "ident2", "import base {prefix b;} typedef t1 {type identityref {base b:i1;} default b:i2;}"
-                    "leaf l {type t1;}", "Invalid type's default value \"b:i2\" which does not fit the type (Invalid"
-                    " identityref \"b:i2\" value - identity found in non-implemented module \"base\".). /ident2:l");
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "ident2", "import base {prefix b;} typedef t1 {type identityref {base b:i1;} default b:i2;}"
+                     "leaf l {type t1;}", "Compiling module \"ident2\" failed.",
+                     "Invalid type's default value \"b:i2\" which does not fit the type (Invalid"
+                     " identityref \"b:i2\" value - identity found in non-implemented module \"base\".). /ident2:l");
 
     /*
      * printing
@@ -210,8 +217,8 @@ test_feature(void **state)
     assert_string_equal(mod->parsed->features[0].name, "feature-name");
 
     /* invalid substatement */
-    TEST_SCHEMA_ERR(ctx, 0, 1, "inv", "<feature name=\"feature-name\"><organization><text>org</text></organization></feature>",
-                    "Unexpected sub-element \"organization\" of \"feature\" element. Line number 1.");
+    TEST_SCHEMA_ERR2(ctx, 0, 1, "inv", "<feature name=\"feature-name\"><organization><text>org</text></organization></feature>",
+                     "Parsing module \"inv\" failed.", "Unexpected sub-element \"organization\" of \"feature\" element. Line number 1.");
 
     /*
      * compiling
@@ -319,41 +326,42 @@ test_feature(void **state)
     logbuf_assert("Feature \"xxx\" not found in module \"b\".");
 
     /* some invalid expressions */
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f{if-feature f1;}",
-                    "Invalid value \"f1\" of if-feature - unable to find feature \"f1\". /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature 'f and';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f{if-feature f1;}", "Compiling module \"inv\" failed.",
+                     "Invalid value \"f1\" of if-feature - unable to find feature \"f1\". /inv:{feature='f'}");
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature 'f and';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"f and\" of if-feature - unexpected end of expression. /inv:{feature='f2'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f{if-feature 'or';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f{if-feature 'or';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"or\" of if-feature - unexpected end of expression. /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature '(f1';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature '(f1';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"(f1\" of if-feature - non-matching opening and closing parentheses. /inv:{feature='f2'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature 'f1)';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature 'f1)';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"f1)\" of if-feature - non-matching opening and closing parentheses. /inv:{feature='f2'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature ---;}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f2{if-feature ---;}", "Compiling module \"inv\" failed.",
                     "Invalid value \"---\" of if-feature - unable to find feature \"---\". /inv:{feature='f2'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "feature f1; feature f2{if-feature 'not f1';}",
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "feature f1; feature f2{if-feature 'not f1';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"not f1\" of if-feature - YANG 1.1 expression in YANG 1.0 module. /inv:{feature='f2'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "feature f1; feature f1;",
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "feature f1; feature f1;", "Compiling module \"inv\" failed.",
                     "Duplicate identifier \"f1\" of feature statement. /inv:{feature='f1'}");
 
     ly_ctx_set_module_imp_clb(ctx, test_imp_clb, "submodule inv_sub {belongs-to inv {prefix inv;} feature f1;}");
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "include inv_sub;feature f1;",
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "include inv_sub;feature f1;", "Compiling module \"inv\" failed.",
                     "Duplicate identifier \"f1\" of feature statement. /inv:{feature='f1'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "feature f1 {if-feature f2;} feature f2 {if-feature f1;}",
-                    "Feature \"f1\" is indirectly referenced from itself. /inv:{feature='f2'}");
-    TEST_SCHEMA_ERR(ctx, 0, 0, "inv", "feature f1 {if-feature f1;}",
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "feature f1 {if-feature f2;} feature f2 {if-feature f1;}",
+                     "Compiling module \"inv\" failed.",
+                     "Feature \"f1\" is indirectly referenced from itself. /inv:{feature='f2'}");
+    TEST_SCHEMA_ERR2(ctx, 0, 0, "inv", "feature f1 {if-feature f1;}", "Compiling module \"inv\" failed.",
                     "Feature \"f1\" is referenced from itself. /inv:{feature='f1'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f {if-feature ();}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f {if-feature ();}", "Compiling module \"inv\" failed.",
                     "Invalid value \"()\" of if-feature - number of features in expression does not match the required number of operands for the operations. /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'f1(';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'f1(';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"f1(\" of if-feature - non-matching opening and closing parentheses. /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'and f1';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'and f1';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"and f1\" of if-feature - missing feature/expression before \"and\" operation. /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'f1 not ';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'f1 not ';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"f1 not \" of if-feature - unexpected end of expression. /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'f1 not not ';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f {if-feature 'f1 not not ';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"f1 not not \" of if-feature - unexpected end of expression. /inv:{feature='f'}");
-    TEST_SCHEMA_ERR(ctx, 1, 0, "inv", "feature f1; feature f2; feature f {if-feature 'or f1 f2';}",
+    TEST_SCHEMA_ERR2(ctx, 1, 0, "inv", "feature f1; feature f2; feature f {if-feature 'or f1 f2';}", "Compiling module \"inv\" failed.",
                     "Invalid value \"or f1 f2\" of if-feature - missing feature/expression before \"or\" operation. /inv:{feature='f'}");
 
     /* import reference */
