@@ -69,7 +69,7 @@ lyd_hash(struct lyd_node *node)
             for (key = ((struct lysc_node_list*)node->schema)->child, iter = list->child;
                     key && key->nodetype == LYS_LEAF && (key->flags & LYS_KEY) && iter;
                     key = key->next, iter = iter->next) {
-                for ( ; iter && iter->schema != key; iter = iter->next);
+                for ( ; iter && iter->schema != key; iter = iter->next) {}
                 if (!iter) {
                     break;
                 }
