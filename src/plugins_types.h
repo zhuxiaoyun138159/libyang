@@ -34,15 +34,6 @@ struct lysc_type;
 struct lysc_type_leafref;
 
 /**
- * @internal
- * @page internals
- *
- * @section types Types Processing
- *
- * @subsection types_
- */
-
-/**
  * @defgroup types Plugins - Types
  * @{
  *
@@ -50,8 +41,7 @@ struct lysc_type_leafref;
  */
 
 /**
- * @page howtoplugins
- * @section Types
+ * @page howtoPluginsTypes
  *
  * YANG allows schemas to define new data types via *typedef* statement or even in leaf's/leaf-list's *type* statements.
  * Such types are derived (directly or indirectly) from a set of [YANG built-in types](https://tools.ietf.org/html/rfc7950#section-4.2.4).
@@ -126,7 +116,7 @@ const struct lys_module *ly_resolve_prefix(const struct ly_ctx *ctx, const char 
  * @param[in] format Format of the prefix.
  * @param[in] prefix_data Format-specific data:
  *      LY_PREF_SCHEMA  - const struct lys_module * (local module)
- *      LY_PREF_XML     - struct ly_set * (set of all returned modules as ::struct lys_module)
+ *      LY_PREF_XML     - struct ly_set * (set of all returned modules as ::lys_module)
  *      LY_PREF_JSON    - NULL
  * @return Module prefix to print.
  * @return NULL on error.
@@ -134,10 +124,10 @@ const struct lys_module *ly_resolve_prefix(const struct ly_ctx *ctx, const char 
 const char *ly_get_prefix(const struct lys_module *mod, LY_PREFIX_FORMAT format, void *prefix_data);
 
 /**
- * @defgroup plugintypeopts Options for type plugin callbacks. The same set of the options is passed to
- * all the type's callbacks used together.
+ * @defgroup plugintypeopts Type store callback options.
  *
- * Options applicable to ly_type_store_clb().
+ * Options applicable to ::ly_type_store_clb().
+ *
  * @{
  */
 #define LY_TYPE_OPTS_DYNAMIC      0x01 /**< Flag for the dynamically allocated string value, in this case the value
