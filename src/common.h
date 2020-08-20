@@ -248,8 +248,11 @@ struct ly_ctx {
  * @{
  */
 
-#define LY_CTX_CHANGED_TREE 0x8000    /**< Deviation changed tree of a module(s) in the context, it is necessary to recompile
-                                           leafref paths, default values and must/when expressions to check that they are still valid */
+/**
+ * @brief Deviation changed tree of a module(s) in the context, it is necessary to recompile leafref paths, default
+ * values and must/when expressions to check that they are still valid.
+ */
+#define LY_CTX_CHANGED_TREE 0x8000
 
 /** @} contextflags */
 
