@@ -23,7 +23,6 @@
 
 #include "common.h"
 #include "compat.h"
-#include "config.h"
 #include "context.h"
 #include "hash_table.h"
 #include "log.h"
@@ -672,20 +671,8 @@ cleanup:
 static LY_ERR
 lyb_print_term(struct lyd_node_term *term, struct ly_out *out, struct lylyb_ctx *lybctx)
 {
-    LY_ERR ret;
-    int dynamic;
-    const char *str;
-
-    /* get value */
-    str = lyd_value2str(term, &dynamic);
-
-    /* print it */
-    ret = lyb_write_string(str, 0, 0, out, lybctx);
-
-    if (dynamic) {
-        free((char *)str);
-    }
-    return ret;
+    /* print the value */
+    return lyb_write_string(LYD_CANON_VALUE(term), 0, 0, out, lybctx);
 }
 
 /**
@@ -699,12 +686,9 @@ lyb_print_term(struct lyd_node_term *term, struct ly_out *out, struct lylyb_ctx 
 static LY_ERR
 lyb_print_metadata(struct ly_out *out, const struct lyd_node *node, struct lyd_lyb_ctx *lybctx)
 {
-    LY_ERR ret;
-    int dynamic;
     uint8_t count = 0;
     const struct lys_module *wd_mod = NULL;
     struct lyd_meta *iter;
-    const char *str;
 
     /* with-defaults */
     if (node->schema->nodetype & LYD_NODE_TERM) {
@@ -750,15 +734,8 @@ lyb_print_metadata(struct ly_out *out, const struct lyd_node *node, struct lyd_l
         /* annotation name with length */
         LY_CHECK_RET(lyb_write_string(iter->name, 0, 1, out, lybctx->lybctx));
 
-        /* get the value */
-        str = lyd_meta2str(iter, &dynamic);
-
         /* metadata value */
-        ret = lyb_write_string(str, 0, 0, out, lybctx->lybctx);
-        if (dynamic) {
-            free((char *)str);
-        }
-        LY_CHECK_RET(ret);
+        LY_CHECK_RET(lyb_write_string(iter->value.canonical, 0, 0, out, lybctx->lybctx));
 
         /* finish metadata subtree */
         LY_CHECK_RET(lyb_write_stop_subtree(out, lybctx->lybctx));
@@ -964,7 +941,7 @@ lyb_print_data(struct ly_out *out, const struct lyd_node *root, int options)
     struct hash_table *top_sibling_ht = NULL;
     const struct lys_module *prev_mod = NULL;
     struct lyd_lyb_ctx *lybctx;
-    const struct ly_ctx *ctx = root ? LYD_NODE_CTX(root) : NULL;
+    const struct ly_ctx *ctx = root ? LYD_CTX(root) : NULL;
 
     lybctx = calloc(1, sizeof *lybctx);
     LY_CHECK_ERR_RET(!lybctx, LOGMEM(ctx), LY_EMEM);

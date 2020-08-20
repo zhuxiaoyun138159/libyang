@@ -19,8 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compat.h"
 #include "common.h"
-#include "config.h"
 #include "diff.h"
 #include "hash_table.h"
 #include "log.h"
@@ -98,7 +98,7 @@ lyd_validate_when(struct lyd_node **tree, struct lyd_node *node, struct lysc_whe
             lyd_free_tree(node);
         } else {
             /* invalid data */
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LY_VCODE_NOWHEN, when->cond->expr);
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LY_VCODE_NOWHEN, when->cond->expr);
             return LY_EVALID;
         }
     } else {
@@ -172,7 +172,7 @@ lyd_validate_unres(struct lyd_node **tree, struct ly_set *node_when, struct ly_s
             struct lyd_node_term *node = (struct lyd_node_term *)node_types->objs[i];
 
             /* validate and store the value of the node */
-            ret = lyd_value_parse(node, node->value.original, strlen(node->value.original), 0, 1, 0, format,
+            ret = lyd_value_parse(node, node->value.canonical, strlen(node->value.canonical), 0, 1, 0, format,
                                   prefix_data, *tree);
             LY_CHECK_RET(ret);
 
@@ -190,8 +190,8 @@ lyd_validate_unres(struct lyd_node **tree, struct ly_set *node_when, struct ly_s
             struct lyd_meta *meta = (struct lyd_meta *)meta_types->objs[i];
 
             /* validate and store the value of the metadata */
-            ret = lyd_value_parse_meta(meta->parent->schema->module->ctx, meta, meta->value.original,
-                                       strlen(meta->value.original), 0, 1, 0, format, prefix_data, NULL, *tree);
+            ret = lyd_value_parse_meta(meta->parent->schema->module->ctx, meta, meta->value.canonical,
+                                       strlen(meta->value.canonical), 0, 1, 0, format, prefix_data, NULL, *tree);
             LY_CHECK_RET(ret);
 
             /* remove this attr from the set */
@@ -904,12 +904,12 @@ lyd_validate_must(const struct lyd_node *node, LYD_VALIDATE_OP op)
         } else if (op == LYD_VALIDATE_OP_REPLY) {
             musts = ((struct lysc_action *)node->schema)->output.musts;
         } else {
-            LOGINT(LYD_NODE_CTX(node));
+            LOGINT(LYD_CTX(node));
             return LY_EINT;
         }
         break;
     default:
-        LOGINT(LYD_NODE_CTX(node));
+        LOGINT(LYD_CTX(node));
         return LY_EINT;
     }
 
@@ -934,7 +934,7 @@ lyd_validate_must(const struct lyd_node *node, LYD_VALIDATE_OP op)
         /* check the result */
         lyxp_set_cast(&xp_set, LYXP_SET_BOOLEAN);
         if (!xp_set.val.bln) {
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LY_VCODE_NOMUST, musts[u].cond->expr);
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LY_VCODE_NOMUST, musts[u].cond->expr);
             return LY_EVALID;
         }
     }
@@ -958,20 +958,20 @@ lyd_validate_final_r(struct lyd_node *first, const struct lysc_node *sparent, co
 
         /* opaque data */
         if (!node->schema) {
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LYVE_DATA, "Opaque node \"%s\" found.",
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LYVE_DATA, "Opaque node \"%s\" found.",
                    ((struct lyd_node_opaq *)node)->name);
             return LY_EVALID;
         }
 
         /* no state/input/output data */
         if ((val_opts & LYD_VALIDATE_NO_STATE) && (node->schema->flags & LYS_CONFIG_R)) {
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LY_VCODE_INNODE, "state", node->schema->name);
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LY_VCODE_INNODE, "state", node->schema->name);
             return LY_EVALID;
         } else if ((op == LYD_VALIDATE_OP_RPC) && (node->schema->flags & LYS_CONFIG_R)) {
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LY_VCODE_INNODE, "output", node->schema->name);
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LY_VCODE_INNODE, "output", node->schema->name);
             return LY_EVALID;
         } else if ((op == LYD_VALIDATE_OP_REPLY) && (node->schema->flags & LYS_CONFIG_W)) {
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LY_VCODE_INNODE, "input", node->schema->name);
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LY_VCODE_INNODE, "input", node->schema->name);
             return LY_EVALID;
         }
 
@@ -980,7 +980,7 @@ lyd_validate_final_r(struct lyd_node *first, const struct lysc_node *sparent, co
 
         /* node's schema if-features */
         if ((snode = lysc_node_is_disabled(node->schema, 1))) {
-            LOGVAL(LYD_NODE_CTX(node), LY_VLOG_LYD, node, LY_VCODE_NOIFF, snode->name);
+            LOGVAL(LYD_CTX(node), LY_VLOG_LYD, node, LY_VCODE_NOIFF, snode->name);
             return LY_EVALID;
         }
 
@@ -1225,12 +1225,12 @@ lyd_validate_op(struct lyd_node *op_tree, const struct lyd_node *tree, LYD_VALID
     }
     if (op == LYD_VALIDATE_OP_RPC || op == LYD_VALIDATE_OP_REPLY) {
         if (!(op_node->schema->nodetype & (LYS_RPC | LYS_ACTION))) {
-            LOGERR(LYD_NODE_CTX(op_tree), LY_EINVAL, "No RPC/action to validate found.");
+            LOGERR(LYD_CTX(op_tree), LY_EINVAL, "No RPC/action to validate found.");
             return LY_EINVAL;
         }
     } else {
         if (op_node->schema->nodetype != LYS_NOTIF) {
-            LOGERR(LYD_NODE_CTX(op_tree), LY_EINVAL, "No notification to validate found.");
+            LOGERR(LYD_CTX(op_tree), LY_EINVAL, "No notification to validate found.");
             return LY_EINVAL;
         }
     }
@@ -1259,7 +1259,7 @@ lyd_validate_op(struct lyd_node *op_tree, const struct lyd_node *tree, LYD_VALID
     /* perform final validation of the operation/notification */
     lyd_validate_obsolete(op_node);
     if (lysc_node_is_disabled(op_node->schema, 1)) {
-        LOGVAL(LYD_NODE_CTX(op_tree), LY_VLOG_LYD, op_node, LY_VCODE_NOIFF, op_node->schema->name);
+        LOGVAL(LYD_CTX(op_tree), LY_VLOG_LYD, op_node, LY_VCODE_NOIFF, op_node->schema->name);
         ret = LY_EVALID;
         goto cleanup;
     }
