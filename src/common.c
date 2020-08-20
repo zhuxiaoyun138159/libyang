@@ -659,7 +659,7 @@ ly_parse_instance_predicate(const char **pred, size_t limit, LYD_FORMAT format,
     }
 
     /* *WSP "]" */
-    for(; isspace(in[offset]); offset++);
+    for(; isspace(in[offset]); offset++) {}
     if (in[offset] != ']') {
         if (expr == 0) {
             *errmsg = "Predicate (pos) is not terminated by \']\' character.";
