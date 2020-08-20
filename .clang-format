@@ -1,7 +1,7 @@
 AccessModifierOffset: -2
 AlignAfterOpenBracket: DontAlign
 AlignConsecutiveAssignments: false
-# AlignConsecutiveBitFields: false
+AlignConsecutiveBitFields: false
 AlignConsecutiveDeclarations: false
 AlignConsecutiveMacros: true
 AlignEscapedNewlines: Left
@@ -12,7 +12,7 @@ AllowAllConstructorInitializersOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortBlocksOnASingleLine: Empty
 AllowShortCaseLabelsOnASingleLine: false
-# AllowShortEnumsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: Empty
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLambdasOnASingleLine: Empty
@@ -36,8 +36,8 @@ BraceWrapping:
   AfterExternBlock: false
   BeforeCatch:     false
   BeforeElse:      false
-  # BeforeLambdaBody: false
-  # BeforeWhile:     false
+  BeforeLambdaBody: false
+  BeforeWhile:     false
   IndentBraces:    false
   SplitEmptyFunction: false
   SplitEmptyRecord: false
@@ -61,8 +61,8 @@ DerivePointerAlignment: false
 DisableFormat:   false
 ExperimentalAutoDetectBinPacking: false
 FixNamespaceComments: true
-## ForEachMacros: ['LY_LIST_FOR', 'LY_LIST_FOR_SAFE', 'LYD_LIST_FOR_INST', 'LYD_LIST_FOR_INST_SAFE', 'LY_ARRAY_FOR', 'LY_ARRAY_FOR_INDEX', 'LY_ARRAY_FOR_ITER']
-IncludeBlocks:   Regroup
+ForEachMacros: ['LY_LIST_FOR', 'LY_LIST_FOR_SAFE', 'LYD_LIST_FOR_INST', 'LYD_LIST_FOR_INST_SAFE', 'LYD_TREE_DFS_BEGIN',  'LY_ARRAY_FOR', 'LY_ARRAY_FOR_INDEX', 'LY_ARRAY_FOR_ITER', 'LYSC_TREE_DFS_BEGIN', 'YANG_READ_SUBSTMT_FOR']
+IncludeBlocks:   Preserve # Regroup
 IncludeCategories:
   - Regex:    '<.*'
     Priority: 1
@@ -73,14 +73,14 @@ IncludeCategories:
     Priority: 3
 IncludeIsMainRegex: '$'
 IncludeIsMainSourceRegex: ''
-# IndentCaseBlocks: false
+IndentCaseBlocks: false
 IndentCaseLabels: false
-# IndentExternBlock: NoIndent
+IndentExternBlock: NoIndent
 IndentGotoLabels: false
 IndentPPDirectives: AfterHash
 IndentWidth:     4
 IndentWrappedFunctionNames: false
-# InsertTrailingCommas: Wrapped
+InsertTrailingCommas: None
 JavaImportGroups:
 JavaScriptQuotes: Double
 JavaScriptWrapImports: false
@@ -91,14 +91,14 @@ MacroBlockEnd:   ''
 MaxEmptyLinesToKeep: 1
 NamespaceIndentation: All
 NamespaceMacros:
-PenaltyBreakAssignment: 2
-PenaltyBreakBeforeFirstCallParameter: 19
-PenaltyBreakComment: 5
-PenaltyBreakFirstLessLess: 120
-PenaltyBreakString: 1000
-PenaltyBreakTemplateDeclaration: 10
-PenaltyExcessCharacter: 1000000
-PenaltyReturnTypeOnItsOwnLine: 60
+PenaltyBreakAssignment: 400
+PenaltyBreakBeforeFirstCallParameter: 500
+PenaltyBreakComment: 0
+PenaltyBreakFirstLessLess: 0
+PenaltyBreakString: 0
+PenaltyBreakTemplateDeclaration: 0
+PenaltyExcessCharacter: 1000
+PenaltyReturnTypeOnItsOwnLine: 0
 PointerAlignment: Right
 RawStringFormats:
 ReflowComments:  true
@@ -111,7 +111,7 @@ SpaceBeforeAssignmentOperators: true
 SpaceBeforeCpp11BracedList: true
 SpaceBeforeCtorInitializerColon: false
 SpaceBeforeInheritanceColon: false
-SpaceBeforeParens: ControlStatements ## ControlStatementsExceptForEachMacros
+SpaceBeforeParens: ControlStatementsExceptForEachMacros
 SpaceBeforeRangeBasedForLoopColon: true
 SpaceBeforeSquareBrackets: false
 SpaceInEmptyBlock: false
@@ -129,4 +129,4 @@ TabWidth:        4
 TypenameMacros:
 UseCRLF:         false
 UseTab:          Never
-# WhitespaceSensitiveMacros:
+WhitespaceSensitiveMacros:
