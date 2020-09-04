@@ -41,12 +41,24 @@ enum schema_type {
     YPR_COMPILED  /**< YANG printer of the compiled schema */
 };
 
+#define YPR_CTX_FLAG_EXTRA_LINE 0x01 /**< Flag for ::ypr_ctx::flags to print extra line in schema */
+
+#define YPR_EXTRA_LINE(COND, CTX) if (COND) { (CTX)->flags |= YPR_CTX_FLAG_EXTRA_LINE; }
+#define YPR_EXTRA_LINE_PRINT(CTX) \
+    if ((CTX)->flags & YPR_CTX_FLAG_EXTRA_LINE) { \
+        (CTX)->flags &= ~YPR_CTX_FLAG_EXTRA_LINE; \
+        if (DO_FORMAT) { \
+            ly_print_((CTX)->out, "\n"); \
+        } \
+    }
+
 /**
  * @brief YANG printer context.
  */
 struct ypr_ctx {
     struct ly_out *out;              /**< output specification */
     uint16_t level;                  /**< current indentation level: 0 - no formatting, >= 1 indentation levels */
+    uint16_t flags;                  /**< internal flags for use by printer */
     uint32_t options;                /**< Schema output options (see @ref schemaprinterflags). */
     const struct lys_module *module; /**< schema to print */
     enum schema_type schema;         /**< type of the schema to print */
@@ -580,7 +592,7 @@ yprp_feature(struct ypr_ctx *ctx, const struct lysp_feature *feat)
 {
     ly_bool flag = 0;
 
-    ly_print_(ctx->out, "\n%*sfeature %s", INDENT, feat->name);
+    ly_print_(ctx->out, "%*sfeature %s", INDENT, feat->name);
     LEVEL++;
     yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, feat->exts, &flag, 0);
     yprp_iffeatures(ctx, feat->iffeatures, feat->exts, &flag);
@@ -596,7 +608,7 @@ yprc_feature(struct ypr_ctx *ctx, const struct lysc_feature *feat)
 {
     ly_bool flag = 0;
 
-    ly_print_(ctx->out, "\n%*sfeature %s", INDENT, feat->name);
+    ly_print_(ctx->out, "%*sfeature %s", INDENT, feat->name);
     LEVEL++;
     yprc_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, feat->exts, &flag, 0);
     yprc_iffeatures(ctx, feat->iffeatures, feat->exts, &flag);
@@ -613,7 +625,7 @@ yprp_identity(struct ypr_ctx *ctx, const struct lysp_ident *ident)
     ly_bool flag = 0;
     LY_ARRAY_COUNT_TYPE u;
 
-    ly_print_(ctx->out, "\n%*sidentity %s", INDENT, ident->name);
+    ly_print_(ctx->out, "%*sidentity %s", INDENT, ident->name);
     LEVEL++;
 
     yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, ident->exts, &flag, 0);
@@ -638,7 +650,7 @@ yprc_identity(struct ypr_ctx *ctx, const struct lysc_ident *ident)
     ly_bool flag = 0;
     LY_ARRAY_COUNT_TYPE u;
 
-    ly_print_(ctx->out, "\n%*sidentity %s", INDENT, ident->name);
+    ly_print_(ctx->out, "%*sidentity %s", INDENT, ident->name);
     LEVEL++;
 
     yprc_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, ident->exts, &flag, 0);
@@ -1056,7 +1068,7 @@ yprc_type(struct ypr_ctx *ctx, const struct lysc_type *type)
 static void
 yprp_typedef(struct ypr_ctx *ctx, const struct lysp_tpdf *tpdf)
 {
-    ly_print_(ctx->out, "\n%*stypedef %s {\n", INDENT, tpdf->name);
+    ly_print_(ctx->out, "%*stypedef %s {\n", INDENT, tpdf->name);
     LEVEL++;
 
     yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, tpdf->exts, NULL, 0);
@@ -1089,7 +1101,7 @@ yprp_grouping(struct ypr_ctx *ctx, const struct lysp_grp *grp)
     ly_bool flag = 0;
     struct lysp_node *data;
 
-    ly_print_(ctx->out, "\n%*sgrouping %s", INDENT, grp->name);
+    ly_print_(ctx->out, "%*sgrouping %s", INDENT, grp->name);
     LEVEL++;
 
     yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, grp->exts, &flag, 0);
@@ -1131,8 +1143,9 @@ yprp_inout(struct ypr_ctx *ctx, const struct lysp_action_inout *inout, ly_bool *
         return;
     }
     ypr_open(ctx->out, flag);
+    YPR_EXTRA_LINE_PRINT(ctx);
 
-    ly_print_(ctx->out, "\n%*s%s {\n", INDENT, (inout->nodetype == LYS_INPUT ? "input" : "output"));
+    ly_print_(ctx->out, "%*s%s {\n", INDENT, (inout->nodetype == LYS_INPUT ? "input" : "output"));
     LEVEL++;
 
     yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, inout->exts, NULL, 0);
@@ -1269,15 +1282,23 @@ yprp_action(struct ypr_ctx *ctx, const struct lysp_action *action)
     ypr_description(ctx, action->dsc, action->exts, &flag);
     ypr_reference(ctx, action->ref, action->exts, &flag);
 
+    YPR_EXTRA_LINE(flag, ctx);
+
     LY_ARRAY_FOR(action->typedefs, u) {
         ypr_open(ctx->out, &flag);
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_typedef(ctx, &action->typedefs[u]);
     }
 
+    YPR_EXTRA_LINE(action->typedefs, ctx);
+
     LY_ARRAY_FOR(action->groupings, u) {
         ypr_open(ctx->out, &flag);
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_grouping(ctx, &action->groupings[u]);
     }
+
+    YPR_EXTRA_LINE(action->groupings, ctx);
 
     yprp_inout(ctx, &action->input, &flag);
     yprp_inout(ctx, &action->output, &flag);
@@ -2116,7 +2137,8 @@ yang_print_parsed_linkage(struct ypr_ctx *ctx, const struct lysp_module *modp)
     LY_ARRAY_COUNT_TYPE u;
 
     LY_ARRAY_FOR(modp->imports, u) {
-        ly_print_(ctx->out, "%s%*simport %s {\n", u ? "" : "\n", INDENT, modp->imports[u].name);
+        YPR_EXTRA_LINE_PRINT(ctx);
+        ly_print_(ctx->out, "%*simport %s {\n", INDENT, modp->imports[u].name);
         LEVEL++;
         yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, modp->imports[u].exts, NULL, 0);
         ypr_substmt(ctx, LYEXT_SUBSTMT_PREFIX, 0, modp->imports[u].prefix, modp->imports[u].exts);
@@ -2128,9 +2150,12 @@ yang_print_parsed_linkage(struct ypr_ctx *ctx, const struct lysp_module *modp)
         LEVEL--;
         ly_print_(ctx->out, "%*s}\n", INDENT);
     }
+    YPR_EXTRA_LINE(modp->imports, ctx);
+
     LY_ARRAY_FOR(modp->includes, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         if (modp->includes[u].rev[0] || modp->includes[u].dsc || modp->includes[u].ref || modp->includes[u].exts) {
-            ly_print_(ctx->out, "%s%*sinclude %s {\n", u ? "" : "\n",  INDENT, modp->includes[u].name);
+            ly_print_(ctx->out, "%*sinclude %s {\n", INDENT, modp->includes[u].name);
             LEVEL++;
             yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, modp->includes[u].exts, NULL, 0);
             if (modp->includes[u].rev[0]) {
@@ -2144,6 +2169,7 @@ yang_print_parsed_linkage(struct ypr_ctx *ctx, const struct lysp_module *modp)
             ly_print_(ctx->out, "\n%*sinclude \"%s\";\n", INDENT, modp->includes[u].name);
         }
     }
+    YPR_EXTRA_LINE(modp->includes, ctx);
 }
 
 static void
@@ -2153,49 +2179,85 @@ yang_print_parsed_body(struct ypr_ctx *ctx, const struct lysp_module *modp)
     struct lysp_node *data;
 
     LY_ARRAY_FOR(modp->extensions, u) {
-        ly_print_(ctx->out, "\n");
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_extension(ctx, &modp->extensions[u]);
     }
+
+    YPR_EXTRA_LINE(modp->extensions, ctx);
+
     if (modp->exts) {
-        ly_print_(ctx->out, "\n");
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, modp->exts, NULL, 0);
     }
 
+    YPR_EXTRA_LINE(modp->exts, ctx);
+
     LY_ARRAY_FOR(modp->features, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_feature(ctx, &modp->features[u]);
+        YPR_EXTRA_LINE(1, ctx);
     }
+
+    YPR_EXTRA_LINE(modp->features, ctx);
 
     LY_ARRAY_FOR(modp->identities, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_identity(ctx, &modp->identities[u]);
+        YPR_EXTRA_LINE(1, ctx);
     }
+
+    YPR_EXTRA_LINE(modp->identities, ctx);
 
     LY_ARRAY_FOR(modp->typedefs, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_typedef(ctx, &modp->typedefs[u]);
+        YPR_EXTRA_LINE(1, ctx);
     }
+
+    YPR_EXTRA_LINE(modp->typedefs, ctx);
 
     LY_ARRAY_FOR(modp->groupings, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_grouping(ctx, &modp->groupings[u]);
+        YPR_EXTRA_LINE(1, ctx);
     }
 
+    YPR_EXTRA_LINE(modp->groupings, ctx);
+
     LY_LIST_FOR(modp->data, data) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_node(ctx, data);
     }
 
+    YPR_EXTRA_LINE(modp->data, ctx);
+
     LY_ARRAY_FOR(modp->augments, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_augment(ctx, &modp->augments[u]);
     }
 
+    YPR_EXTRA_LINE(modp->augments, ctx);
+
     LY_ARRAY_FOR(modp->rpcs, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_action(ctx, &modp->rpcs[u]);
     }
 
+    YPR_EXTRA_LINE(modp->rpcs, ctx);
+
     LY_ARRAY_FOR(modp->notifs, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_notification(ctx, &modp->notifs[u]);
     }
 
+    YPR_EXTRA_LINE(modp->notifs, ctx);
+
     LY_ARRAY_FOR(modp->deviations, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_deviation(ctx, &modp->deviations[u]);
     }
+
+    YPR_EXTRA_LINE(modp->deviations, ctx);
 }
 
 LY_ERR
@@ -2211,29 +2273,33 @@ yang_print_parsed_module(struct ly_out *out, const struct lys_module *module, co
     if (module->version) {
         ypr_substmt(ctx, LYEXT_SUBSTMT_VERSION, 0, module->version == LYS_VERSION_1_1 ? "1.1" : "1", modp->exts);
     }
-
     ypr_substmt(ctx, LYEXT_SUBSTMT_NAMESPACE, 0, module->ns, modp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_PREFIX, 0, module->prefix, modp->exts);
+
+    YPR_EXTRA_LINE(1, ctx);
 
     /* linkage-stmts (import/include) */
     yang_print_parsed_linkage(ctx, modp);
 
     /* meta-stmts */
     if (module->org || module->contact || module->dsc || module->ref) {
-        ly_print_(out, "\n");
+        YPR_EXTRA_LINE_PRINT(ctx);
     }
     ypr_substmt(ctx, LYEXT_SUBSTMT_ORGANIZATION, 0, module->org, modp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_CONTACT, 0, module->contact, modp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_DESCRIPTION, 0, module->dsc, modp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_REFERENCE, 0, module->ref, modp->exts);
 
+    YPR_EXTRA_LINE(module->org || module->contact || module->dsc || module->ref, ctx);
+
     /* revision-stmts */
-    if (modp->revs) {
-        ly_print_(out, "\n");
-    }
     LY_ARRAY_FOR(modp->revs, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_revision(ctx, &modp->revs[u]);
     }
+
+    YPR_EXTRA_LINE(modp->revs, ctx);
+
     /* body-stmts */
     yang_print_parsed_body(ctx, modp);
 
@@ -2271,25 +2337,30 @@ yang_print_parsed_submodule(struct ly_out *out, const struct lys_module *module,
 
     yprp_belongsto(ctx, submodp);
 
+    YPR_EXTRA_LINE(1, ctx);
+
     /* linkage-stmts (import/include) */
     yang_print_parsed_linkage(ctx, (struct lysp_module *)submodp);
 
     /* meta-stmts */
     if (submodp->org || submodp->contact || submodp->dsc || submodp->ref) {
-        ly_print_(out, "\n");
+        YPR_EXTRA_LINE_PRINT(ctx);
     }
     ypr_substmt(ctx, LYEXT_SUBSTMT_ORGANIZATION, 0, submodp->org, submodp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_CONTACT, 0, submodp->contact, submodp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_DESCRIPTION, 0, submodp->dsc, submodp->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_REFERENCE, 0, submodp->ref, submodp->exts);
 
+    YPR_EXTRA_LINE(submodp->org || submodp->contact || submodp->dsc || submodp->ref, ctx);
+
     /* revision-stmts */
-    if (submodp->revs) {
-        ly_print_(out, "\n");
-    }
     LY_ARRAY_FOR(submodp->revs, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprp_revision(ctx, &submodp->revs[u]);
     }
+
+    YPR_EXTRA_LINE(submodp->revs, ctx);
+
     /* body-stmts */
     yang_print_parsed_body(ctx, (struct lysp_module *)submodp);
 
@@ -2329,48 +2400,69 @@ yang_print_compiled(struct ly_out *out, const struct lys_module *module, uint32_
     ypr_substmt(ctx, LYEXT_SUBSTMT_NAMESPACE, 0, module->ns, modc->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_PREFIX, 0, module->prefix, modc->exts);
 
+    YPR_EXTRA_LINE(1, ctx);
+
     /* no linkage-stmts */
 
     /* meta-stmts */
     if (module->org || module->contact || module->dsc || module->ref) {
-        ly_print_(out, "\n");
+        YPR_EXTRA_LINE_PRINT(ctx);
     }
     ypr_substmt(ctx, LYEXT_SUBSTMT_ORGANIZATION, 0, module->org, modc->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_CONTACT, 0, module->contact, modc->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_DESCRIPTION, 0, module->dsc, modc->exts);
     ypr_substmt(ctx, LYEXT_SUBSTMT_REFERENCE, 0, module->ref, modc->exts);
 
+    YPR_EXTRA_LINE(module->org || module->contact || module->dsc || module->ref, ctx);
+
     /* revision-stmts */
     if (module->revision) {
-        ly_print_(ctx->out, "\n%*srevision %s;\n", INDENT, module->revision);
+        YPR_EXTRA_LINE_PRINT(ctx);
+        ly_print_(ctx->out, "%*srevision %s;\n", INDENT, module->revision);
+        YPR_EXTRA_LINE(1, ctx);
     }
 
     /* body-stmts */
     if (modc->exts) {
-        ly_print_(out, "\n");
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprc_extension_instances(ctx, LYEXT_SUBSTMT_SELF, 0, module->compiled->exts, NULL, 0);
+        YPR_EXTRA_LINE(1, ctx);
     }
 
     LY_ARRAY_FOR(modc->features, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprc_feature(ctx, &modc->features[u]);
+        YPR_EXTRA_LINE(1, ctx);
     }
 
     LY_ARRAY_FOR(modc->identities, u) {
+        YPR_EXTRA_LINE_PRINT(ctx);
         yprc_identity(ctx, &modc->identities[u]);
+        YPR_EXTRA_LINE(1, ctx);
     }
 
     if (!(ctx->options & LYS_PRINT_NO_SUBSTMT)) {
+
         LY_LIST_FOR(modc->data, data) {
+            YPR_EXTRA_LINE_PRINT(ctx);
             yprc_node(ctx, data);
         }
 
+        YPR_EXTRA_LINE(modc->data, ctx);
+
         LY_ARRAY_FOR(modc->rpcs, u) {
+            YPR_EXTRA_LINE_PRINT(ctx);
             yprc_action(ctx, &modc->rpcs[u]);
         }
 
+        YPR_EXTRA_LINE(modc->rpcs, ctx);
+
         LY_ARRAY_FOR(modc->notifs, u) {
+            YPR_EXTRA_LINE_PRINT(ctx);
             yprc_notification(ctx, &modc->notifs[u]);
         }
+
+        YPR_EXTRA_LINE(modc->notifs, ctx);
     }
 
     LEVEL--;
