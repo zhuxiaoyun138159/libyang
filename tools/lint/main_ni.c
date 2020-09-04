@@ -338,6 +338,7 @@ main_ni(int argc, char* argv[])
     } *data = NULL, *data_item, *data_prev = NULL;
     struct ly_set *mods = NULL;
     void *p;
+    uint8_t type = 0; /* type of the data: 0 - data, 1 - rpc, 2 - rpc-reply, 3 - notification */
 
     opterr = 0;
 #ifndef NDEBUG
@@ -525,6 +526,8 @@ main_ni(int argc, char* argv[])
         case 't':
             if (!strcmp(optarg, "auto")) {
                 autodetection = 1;
+            } else if (!strcmp(optarg, "rpc")) {
+                type = 1;
             /*} else if (!strcmp(optarg, "config")) {
                 options_parser |= LYD_OPT_CONFIG;
             } else if (!strcmp(optarg, "get")) {
@@ -534,7 +537,7 @@ main_ni(int argc, char* argv[])
             } else if (!strcmp(optarg, "edit")) {
                 options_parser |= LYD_OPT_EDIT;*/
             } else if (!strcmp(optarg, "data")) {
-                /* no options */
+                type = 0; /* default value */
             } else {
                 fprintf(stderr, "yanglint error: unknown data tree type %s\n", optarg);
                 help(1);
@@ -990,10 +993,21 @@ parse_reply:
                     fprintf(stderr, "yanglint error: input data file \"%s\".\n", data_item->filename);
                     goto cleanup;
                 }
-                if (lyd_parse_data(ctx, in, 0, options_parser, LYD_VALIDATE_PRESENT, &data_item->tree)) {
-                    fprintf(stderr, "yanglint error: Failed to parse input data file \"%s\".\n", data_item->filename);
-                    ly_in_free(in, 0);
-                    goto cleanup;
+                switch (type) {
+                case 0: /* data */
+                    if (lyd_parse_data(ctx, in, 0, options_parser, LYD_VALIDATE_PRESENT, &data_item->tree)) {
+                        fprintf(stderr, "yanglint error: Failed to parse input data file \"%s\".\n", data_item->filename);
+                        ly_in_free(in, 0);
+                        goto cleanup;
+                    }
+                    break;
+                case 1: /* rpc */
+                    if (lyd_parse_rpc(ctx, in, 0, &data_item->tree, NULL)) {
+                        fprintf(stderr, "yanglint error: Failed to parse input data file \"%s\" as RPC.\n", data_item->filename);
+                        ly_in_free(in, 0);
+                        goto cleanup;
+                    }
+                    break;
                 }
                 ly_in_free(in, 0);
             }
