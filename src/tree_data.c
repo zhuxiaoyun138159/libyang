@@ -630,8 +630,8 @@ lyd_create_list2(const struct lysc_node *schema, const char *keys, size_t keys_l
             LY_PATH_PRED_KEYS, &expr), cleanup);
 
     /* compile them */
-    LY_CHECK_GOTO(ret = ly_path_compile_predicate(schema->module->ctx, NULL, NULL, schema, expr, &exp_idx,
-            LY_PREF_JSON, NULL, &predicates, &pred_type), cleanup);
+    LY_CHECK_GOTO(ret = ly_path_compile_predicate(schema->module->ctx, NULL, schema, expr, &exp_idx, LY_PREF_JSON, NULL,
+            &predicates, &pred_type), cleanup);
 
     /* create the list node */
     LY_CHECK_GOTO(ret = lyd_create_list(schema, predicates, node), cleanup);
@@ -1209,9 +1209,9 @@ lyd_new_path2(struct lyd_node *parent, const struct ly_ctx *ctx, const char *pat
             LY_PATH_PREFIX_OPTIONAL, LY_PATH_PRED_SIMPLE, &exp), cleanup);
 
     /* compile path */
-    LY_CHECK_GOTO(ret = ly_path_compile(ctx, NULL, parent ? parent->schema : NULL, exp, LY_PATH_LREF_FALSE,
-            options & LYD_NEW_PATH_OUTPUT ? LY_PATH_OPER_OUTPUT : LY_PATH_OPER_INPUT,
-            LY_PATH_TARGET_MANY, LY_PREF_JSON, NULL, &p), cleanup);
+    LY_CHECK_GOTO(ret = ly_path_compile(ctx, parent ? parent->schema : NULL, exp, LY_PATH_LREF_FALSE,
+            options & LYD_NEW_PATH_OUTPUT ? LY_PATH_OPER_OUTPUT : LY_PATH_OPER_INPUT, LY_PATH_TARGET_MANY, LY_PREF_JSON,
+            NULL, &p), cleanup);
 
     schema = p[LY_ARRAY_COUNT(p) - 1].node;
     if ((schema->nodetype == LYS_LIST) && (p[LY_ARRAY_COUNT(p) - 1].pred_type == LY_PATH_PREDTYPE_NONE) &&

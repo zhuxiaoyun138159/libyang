@@ -748,9 +748,9 @@ set_init(struct lyxp_set *new, const struct lyxp_set *set)
         new->ctx_node = set->ctx_node;
         new->root_type = set->root_type;
         new->context_op = set->context_op;
-        new->local_mod = set->local_mod;
         new->tree = set->tree;
         new->format = set->format;
+        new->prefix_data = set->prefix_data;
     }
 }
 
@@ -3333,7 +3333,7 @@ warn_equality_value(struct lyxp_expr *exp, struct lyxp_set *set, uint16_t val_ex
 
         type = ((struct lysc_node_leaf *)scnode)->type;
         if (type->basetype != LY_TYPE_IDENT) {
-            rc = type->plugin->store(set->ctx, type, value, strlen(value), 0, LY_PREF_SCHEMA, (void *)set->local_mod,
+            rc = type->plugin->store(set->ctx, type, value, strlen(value), 0, set->format, set->prefix_data,
                     LYD_HINT_DATA, scnode, &storage, &err);
 
             if (err) {
@@ -3697,8 +3697,8 @@ xpath_deref(struct lyxp_set **args, uint16_t UNUSED(arg_count), struct lyxp_set 
             oper = lysc_is_output((struct lysc_node *)sleaf) ? LY_PATH_OPER_OUTPUT : LY_PATH_OPER_INPUT;
 
             /* it was already evaluated on schema, it must succeed */
-            rc = ly_path_compile(set->ctx, sleaf->module, (struct lysc_node *)sleaf, lref->path, LY_PATH_LREF_TRUE,
-                    oper, LY_PATH_TARGET_MANY, set->format, (void *)lref->path_mod, &p);
+            rc = ly_path_compile(set->ctx, (struct lysc_node *)sleaf, lref->path, LY_PATH_LREF_TRUE, oper,
+                    LY_PATH_TARGET_MANY, LY_PREF_SCHEMA_RESOLVED, lref->prefixes, &p);
             assert(!rc);
 
             /* get the target node */
@@ -3807,7 +3807,7 @@ xpath_derived_(struct lyxp_set **args, struct lyxp_set *set, uint32_t options, l
 
             /* store args[1] as ident */
             rc = val->realtype->plugin->store(set->ctx, val->realtype, args[1]->val.str, strlen(args[1]->val.str),
-                    0, set->format, (void *)set->local_mod, LYD_HINT_DATA, leaf->schema, &data, &err);
+                    0, set->format, set->prefix_data, LYD_HINT_DATA, leaf->schema, &data, &err);
         } else {
             meta = args[0]->val.meta[i].meta;
             val = &meta->value;
@@ -3818,7 +3818,7 @@ xpath_derived_(struct lyxp_set **args, struct lyxp_set *set, uint32_t options, l
 
             /* store args[1] as ident */
             rc = val->realtype->plugin->store(set->ctx, val->realtype, args[1]->val.str, strlen(args[1]->val.str), 0,
-                    set->format, (void *)meta->annotation->module, LYD_HINT_DATA, meta->parent->schema, &data, &err);
+                    set->format, set->prefix_data, LYD_HINT_DATA, meta->parent->schema, &data, &err);
         }
 
         if (err) {
@@ -4190,6 +4190,7 @@ xpath_name(struct lyxp_set **args, uint16_t arg_count, struct lyxp_set *set, uin
     struct lys_module *mod = NULL;
     char *str;
     const char *name = NULL;
+    void *get_prefix_data;
 
     if (options & LYXP_SCNODE_ALL) {
         set_scnode_clear_ctx(set);
@@ -4247,15 +4248,22 @@ xpath_name(struct lyxp_set **args, uint16_t arg_count, struct lyxp_set *set, uin
 
         switch (set->format) {
         case LY_PREF_SCHEMA:
-            rc = asprintf(&str, "%s:%s", lys_prefix_find_module(set->local_mod, mod), name);
-            break;
-        case LY_PREF_JSON:
-            rc = asprintf(&str, "%s:%s", mod->name, name);
+            /* get local module */
+            get_prefix_data = ((const struct lysp_module *)set->prefix_data)->mod;
             break;
         case LY_PREF_SCHEMA_RESOLVED:
+            /* same data as for resolve prefix */
+            get_prefix_data = set->prefix_data;
+            break;
+        case LY_PREF_JSON:
+            /* nothing needed */
+            get_prefix_data = NULL;
+            break;
         case LY_PREF_XML:
             LOGINT_RET(set->ctx);
         }
+
+        rc = asprintf(&str, "%s:%s", ly_get_prefix(mod, set->format, get_prefix_data), name);
         LY_CHECK_ERR_RET(rc == -1, LOGMEM(set->ctx), LY_EMEM);
         set_fill_string(set, str, strlen(str));
         free(str);
@@ -5276,7 +5284,7 @@ moveto_resolve_model(const char **qname, uint16_t *qname_len, struct lyxp_set *s
     if ((ptr = ly_strnchr(*qname, ':', *qname_len))) {
         /* specific module */
         pref_len = ptr - *qname;
-        mod = ly_resolve_prefix(set->ctx, *qname, pref_len, set->format, (void *)set->local_mod);
+        mod = ly_resolve_prefix(set->ctx, *qname, pref_len, set->format, set->prefix_data);
 
         /* check for errors and non-implemented modules, as they are not valid */
         if (!mod || !mod->implemented) {
@@ -5656,7 +5664,7 @@ moveto_scnode(struct lyxp_set *set, const struct lys_module *mod, const char *nc
 
         } else if (set->val.scnodes[i].type == LYXP_NODE_ELEM) {
             iter = NULL;
-            moveto_mod = mod ? mod : set->local_mod;
+            moveto_mod = mod;
             while ((iter = lys_getnext(iter, start_parent, NULL, getnext_opts))) {
                 if (!moveto_scnode_check(iter, set->root_type, set->context_op, ncname, moveto_mod)) {
                     LY_CHECK_RET(lyxp_set_scnode_insert_node(set, iter, LYXP_NODE_ELEM, &idx));
@@ -6845,6 +6853,7 @@ eval_literal(struct lyxp_expr *exp, uint16_t *tok_idx, struct lyxp_set *set)
  * @param[in,out] tok_idx Index in @p exp at the beginning of the predicate, is updated on success.
  * @param[in] scnode Found schema node as context for the predicate.
  * @param[in] format Format of any prefixes in key names/values.
+ * @param[in] prefix_data Format-specific prefix data (see ::ly_resolve_prefix).
  * @param[out] predicates Parsed predicates.
  * @param[out] pred_type Type of @p predicates.
  * @return LY_SUCCESS on success,
@@ -6852,7 +6861,7 @@ eval_literal(struct lyxp_expr *exp, uint16_t *tok_idx, struct lyxp_set *set)
  */
 static LY_ERR
 eval_name_test_try_compile_predicates(struct lyxp_expr *exp, uint16_t *tok_idx, const struct lysc_node *scnode,
-        LY_PREFIX_FORMAT format, struct ly_path_predicate **predicates,
+        LY_PREFIX_FORMAT format, void *prefix_data, struct ly_path_predicate **predicates,
         enum ly_path_pred_type *pred_type)
 {
     LY_ERR ret = LY_SUCCESS;
@@ -6918,8 +6927,8 @@ eval_name_test_try_compile_predicates(struct lyxp_expr *exp, uint16_t *tok_idx, 
             LY_PATH_PREFIX_OPTIONAL, LY_PATH_PRED_SIMPLE, &exp2), cleanup);
 
     /* compile */
-    ret = ly_path_compile_predicate(scnode->module->ctx, scnode, scnode->module, scnode, exp2, &pred_idx,
-            format, scnode->module, predicates, pred_type);
+    ret = ly_path_compile_predicate(scnode->module->ctx, scnode, scnode, exp2, &pred_idx, format, prefix_data,
+            predicates, pred_type);
     LY_CHECK_GOTO(ret, cleanup);
 
     /* success, the predicate must include all the needed information for hash-based search */
@@ -6953,7 +6962,7 @@ eval_name_test_with_predicate(struct lyxp_expr *exp, uint16_t *tok_idx, ly_bool 
     char *path;
     const char *ncname, *ncname_dict = NULL;
     uint16_t ncname_len;
-    const struct lys_module *moveto_mod;
+    const struct lys_module *moveto_mod = NULL;
     const struct lysc_node *scnode = NULL, *tmp;
     struct ly_path_predicate *predicates = NULL;
     enum ly_path_pred_type pred_type = 0;
@@ -7006,7 +7015,8 @@ eval_name_test_with_predicate(struct lyxp_expr *exp, uint16_t *tok_idx, ly_bool 
 
         if (scnode && (scnode->nodetype & (LYS_LIST | LYS_LEAFLIST))) {
             /* try to create the predicates */
-            if (eval_name_test_try_compile_predicates(exp, tok_idx, scnode, set->format, &predicates, &pred_type)) {
+            if (eval_name_test_try_compile_predicates(exp, tok_idx, scnode, set->format, set->prefix_data,
+                    &predicates, &pred_type)) {
                 /* hashes cannot be used */
                 scnode = NULL;
             }
@@ -7020,6 +7030,11 @@ eval_name_test_with_predicate(struct lyxp_expr *exp, uint16_t *tok_idx, ly_bool 
     }
 
 moveto:
+    if (!moveto_mod && set && ((set->format == LY_PREF_SCHEMA) || (set->format == LY_PREF_SCHEMA_RESOLVED))) {
+        /* in this case unprefixed nodes must be from the local module */
+        moveto_mod = ly_resolve_prefix(set->ctx, NULL, 0, set->format, set->prefix_data);
+    }
+
     /* move to the attribute(s), data node(s), or schema node(s) */
     if (attr_axis) {
         if (set && (options & LYXP_SCNODE_ALL)) {
@@ -8332,14 +8347,14 @@ lyxp_get_root_type(const struct lyd_node *ctx_node, const struct lysc_node *ctx_
 }
 
 LY_ERR
-lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct lys_module *local_mod, const struct lyd_node *ctx_node,
+lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, void *prefix_data, const struct lyd_node *ctx_node,
         enum lyxp_node_type ctx_node_type, const struct lyd_node *tree, struct lyxp_set *set, uint32_t options)
 {
     uint16_t tok_idx = 0;
     const struct lyd_node *real_ctx_node;
     LY_ERR rc;
 
-    LY_CHECK_ARG_RET(NULL, exp, local_mod, ctx_node, set, LY_EINVAL);
+    LY_CHECK_ARG_RET(NULL, exp, ctx_node, set, LY_EINVAL);
 
     if ((ctx_node_type == LYXP_NODE_ROOT) || (ctx_node_type == LYXP_NODE_ROOT_CONFIG)) {
         /* we always need some context node because it is used for resolving unqualified names */
@@ -8353,15 +8368,15 @@ lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct lys_modul
     memset(set, 0, sizeof *set);
     set->type = LYXP_SET_NODE_SET;
     set_insert_node(set, (struct lyd_node *)real_ctx_node, 0, ctx_node_type, 0);
-    set->ctx = local_mod->ctx;
+    set->ctx = (struct ly_ctx *)LYD_CTX(ctx_node);
     set->ctx_node = ctx_node;
     set->root_type = lyxp_get_root_type(real_ctx_node, NULL, options);
     for (set->context_op = ctx_node->schema;
             set->context_op && !(set->context_op->nodetype & (LYS_RPC | LYS_ACTION | LYS_NOTIF));
             set->context_op = set->context_op->parent) {}
-    set->local_mod = local_mod;
     set->tree = tree;
     set->format = format;
+    set->prefix_data = prefix_data;
 
     /* evaluate */
     rc = eval_expr_select(exp, &tok_idx, 0, set, options);
@@ -8601,16 +8616,16 @@ lyxp_set_cast(struct lyxp_set *set, enum lyxp_set_type target)
 }
 
 LY_ERR
-lyxp_atomize(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct lys_module *local_mod,
-        const struct lysc_node *ctx_scnode, enum lyxp_node_type ctx_scnode_type, struct lyxp_set *set, uint32_t options)
+lyxp_atomize(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, void *prefix_data, const struct lysc_node *ctx_scnode,
+        enum lyxp_node_type ctx_scnode_type, struct lyxp_set *set, uint32_t options)
 {
-    struct ly_ctx *ctx;
+    const struct ly_ctx *ctx;
     const struct lysc_node *real_ctx_scnode;
     uint16_t tok_idx = 0;
 
-    LY_CHECK_ARG_RET(NULL, exp, local_mod, ctx_scnode, set, LY_EINVAL);
+    LY_CHECK_ARG_RET(NULL, exp, ctx_scnode, set, LY_EINVAL);
 
-    ctx = local_mod->ctx;
+    ctx = ctx_scnode->module->ctx;
     if ((ctx_scnode_type == LYXP_NODE_ROOT) || (ctx_scnode_type == LYXP_NODE_ROOT_CONFIG)) {
         /* we always need some context node because it is used for resolving unqualified names */
         real_ctx_scnode = NULL;
@@ -8624,14 +8639,14 @@ lyxp_atomize(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct lys_mo
     set->type = LYXP_SET_SCNODE_SET;
     LY_CHECK_RET(lyxp_set_scnode_insert_node(set, real_ctx_scnode, ctx_scnode_type, NULL));
     set->val.scnodes[0].in_ctx = -2;
-    set->ctx = ctx;
+    set->ctx = (struct ly_ctx *)ctx;
     set->ctx_scnode = ctx_scnode;
     set->root_type = lyxp_get_root_type(NULL, real_ctx_scnode, options);
     for (set->context_op = ctx_scnode;
             set->context_op && !(set->context_op->nodetype & (LYS_RPC | LYS_ACTION | LYS_NOTIF));
             set->context_op = set->context_op->parent) {}
-    set->local_mod = local_mod;
     set->format = format;
+    set->prefix_data = prefix_data;
 
     /* evaluate */
     return eval_expr_select(exp, &tok_idx, 0, set, options);

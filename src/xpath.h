@@ -258,9 +258,9 @@ struct lyxp_set {
     };
     enum lyxp_node_type root_type;
     const struct lysc_node *context_op;
-    const struct lys_module *local_mod;
     const struct lyd_node *tree;
     LY_PREFIX_FORMAT format;
+    void *prefix_data;
 };
 
 /**
@@ -277,7 +277,7 @@ const char *lyxp_print_token(enum lyxp_token tok);
  *
  * @param[in] exp Parsed XPath expression to be evaluated.
  * @param[in] format Format of the XPath expression (more specifcally, of any used prefixes).
- * @param[in] local_mod Local module relative to the @p expr.
+ * @param[in] prefix_data Format-specific prefix data (see ::ly_resolve_prefix).
  * @param[in] ctx_node Current (context) data node. In case of a root node, set @p ctx_node_type correctly,
  * but @p ctx_node must also be set to any node from the root node module - it will be used for resolving
  * unqualified names.
@@ -290,9 +290,8 @@ const char *lyxp_print_token(enum lyxp_token tok);
  * @return LY_EINCOMPLETE for unresolved when,
  * @return LY_EINVAL, LY_EMEM, LY_EINT for other errors.
  */
-LY_ERR lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct lys_module *local_mod,
-        const struct lyd_node *ctx_node, enum lyxp_node_type ctx_node_type, const struct lyd_node *tree,
-        struct lyxp_set *set, uint32_t options);
+LY_ERR lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, void *prefix_data, const struct lyd_node *ctx_node,
+        enum lyxp_node_type ctx_node_type, const struct lyd_node *tree, struct lyxp_set *set, uint32_t options);
 
 #define LYXP_SCHEMA 0x01        /**< Apply data node access restrictions defined for 'when' and 'must' evaluation. */
 
@@ -301,7 +300,7 @@ LY_ERR lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct ly
  *
  * @param[in] exp Parsed XPath expression to be evaluated.
  * @param[in] format Format of the XPath expression (more specifcally, of any used prefixes).
- * @param[in] local_mod Local module relative to the @p exp.
+ * @param[in] prefix_data Format-specific prefix data (see ::ly_resolve_prefix).
  * @param[in] ctx_scnode Current (context) schema node. In case of a root node, set @p ctx_scnode_type correctly,
  * but @p ctx_scnode must also be set to any node from the root node module - it will be used for resolving
  * unqualified names.
@@ -310,9 +309,8 @@ LY_ERR lyxp_eval(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct ly
  * @param[in] options Whether to apply some evaluation restrictions, one flag must always be used.
  * @return LY_ERR (same as lyxp_eval()).
  */
-LY_ERR lyxp_atomize(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, const struct lys_module *local_mod,
-        const struct lysc_node *ctx_scnode, enum lyxp_node_type ctx_scnode_type, struct lyxp_set *set,
-        uint32_t options);
+LY_ERR lyxp_atomize(struct lyxp_expr *exp, LY_PREFIX_FORMAT format, void *prefix_data, const struct lysc_node *ctx_scnode,
+        enum lyxp_node_type ctx_scnode_type, struct lyxp_set *set, uint32_t options);
 
 /* used only internally */
 #define LYXP_SCNODE_ALL 0x0E

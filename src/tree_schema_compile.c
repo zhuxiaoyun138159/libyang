@@ -501,29 +501,31 @@ iff_setop(uint8_t *list, uint8_t op, size_t pos)
  * ly_ctx_module_implement()), the compilation of these feature structure is finished, but the pointers
  * assigned till that time will be still valid.
  *
- * @param[in] mod Module where the feature was referenced (used to resolve prefix of the feature).
+ * @param[in] pmod Module where the feature was referenced (used to resolve prefix of the feature).
  * @param[in] name Name of the feature including possible prefix.
  * @param[in] len Length of the string representing the feature identifier in the name variable (mandatory!).
  * @return Pointer to the feature structure if found, NULL otherwise.
  */
 static struct lysc_feature *
-lys_feature_find(const struct lys_module *mod, const char *name, size_t len)
+lys_feature_find(const struct lysp_module *pmod, const char *name, size_t len)
 {
-    size_t i;
     LY_ARRAY_COUNT_TYPE u;
     struct lysc_feature *f;
+    const struct lys_module *mod;
+    const char *ptr;
 
-    assert(mod);
+    assert(pmod);
 
-    for (i = 0; i < len; ++i) {
-        if (name[i] == ':') {
-            /* we have a prefixed feature */
-            mod = lys_module_find_prefix(mod, name, i);
-            LY_CHECK_RET(!mod, NULL);
+    if ((ptr = ly_strnchr(name, ':', len))) {
+        /* we have a prefixed feature */
+        mod = lysp_module_find_prefix(pmod, name, ptr - name);
+        LY_CHECK_RET(!mod, NULL);
 
-            name = &name[i + 1];
-            len = len - i - 1;
-        }
+        len = len - (ptr - name) - 1;
+        name = ptr + 1;
+    } else {
+        /* local feature */
+        mod = pmod->mod;
     }
 
     /* we have the correct module, get the feature */
@@ -607,18 +609,17 @@ lys_compile_ext(struct lysc_ctx *ctx, struct lysp_ext_instance *ext_p, struct ly
         /* YIN parser has to replace prefixes by the namespace - XML namespace/prefix pairs may differs form the YANG schema's
          * namespace/prefix pair. YIN parser does not have the imports available, so mapping from XML namespace to the
          * YANG (import) prefix must be done here. */
-        if (!ly_strncmp(ctx->mod_def->ns, ext_p->name, u - 1)) {
+        if (!ly_strncmp(ctx->mod_def->mod->ns, ext_p->name, u - 1)) {
             LY_CHECK_GOTO(ret = lydict_insert(ctx->ctx, &ext_p->name[u], 0, &prefixed_name), cleanup);
             u = 0;
         } else {
-            assert(ctx->mod_def->parsed);
-            LY_ARRAY_FOR(ctx->mod_def->parsed->imports, v) {
-                if (!ly_strncmp(ctx->mod_def->parsed->imports[v].module->ns, ext_p->name, u - 1)) {
+            LY_ARRAY_FOR(ctx->mod_def->imports, v) {
+                if (!ly_strncmp(ctx->mod_def->imports[v].module->ns, ext_p->name, u - 1)) {
                     char *s;
-                    LY_CHECK_ERR_GOTO(asprintf(&s, "%s:%s", ctx->mod_def->parsed->imports[v].prefix, &ext_p->name[u]) == -1,
+                    LY_CHECK_ERR_GOTO(asprintf(&s, "%s:%s", ctx->mod_def->imports[v].prefix, &ext_p->name[u]) == -1,
                             ret = LY_EMEM, cleanup);
                     LY_CHECK_GOTO(ret = lydict_insert_zc(ctx->ctx, s, &prefixed_name), cleanup);
-                    u = strlen(ctx->mod_def->parsed->imports[v].prefix) + 1; /* add semicolon */
+                    u = strlen(ctx->mod_def->imports[v].prefix) + 1; /* add semicolon */
                     break;
                 }
             }
@@ -635,7 +636,7 @@ lys_compile_ext(struct lysc_ctx *ctx, struct lysp_ext_instance *ext_p, struct ly
     lysc_update_path(ctx, NULL, prefixed_name);
 
     if (!ext_mod) {
-        ext_mod = u ? lys_module_find_prefix(ctx->mod_def, prefixed_name, u - 1) : ctx->mod_def;
+        ext_mod = u ? lysp_module_find_prefix(ctx->mod_def, prefixed_name, u - 1) : ctx->mod_def->mod;
         if (!ext_mod) {
             LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
                     "Invalid prefix \"%.*s\" used for extension instance identifier.", u, prefixed_name);
@@ -829,7 +830,7 @@ lys_compile_iffeature(struct lysc_ctx *ctx, struct lysp_qname *qname, struct lys
 
     if (checkversion || (expr_size > 1)) {
         /* check that we have 1.1 module */
-        if (qname->mod->version != LYS_VERSION_1_1) {
+        if (qname->pmod->version != LYS_VERSION_1_1) {
             LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_SYNTAX_YANG,
                     "Invalid value \"%s\" of if-feature - YANG 1.1 expression in YANG 1.0 module.", qname->str);
             return LY_EVALID;
@@ -897,7 +898,7 @@ lys_compile_iffeature(struct lysc_ctx *ctx, struct lysp_qname *qname, struct lys
             iff_setop(iff->expr, LYS_IFF_F, expr_size--);
 
             /* now get the link to the feature definition */
-            f = lys_feature_find(qname->mod, &c[i], j - i);
+            f = lys_feature_find(qname->pmod, &c[i], j - i);
             LY_CHECK_ERR_GOTO(!f, LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_SYNTAX_YANG,
                     "Invalid value \"%s\" of if-feature - unable to find feature \"%.*s\".", qname->str, j - i, &c[i]);
                     rc = LY_EVALID, error)
@@ -961,7 +962,7 @@ lys_compile_when_(struct lysc_ctx *ctx, struct lysp_when *when_p, uint16_t flags
     LY_CHECK_ERR_RET(!(*when), LOGMEM(ctx->ctx), LY_EMEM);
     (*when)->refcount = 1;
     LY_CHECK_RET(lyxp_expr_parse(ctx->ctx, when_p->cond, 0, 1, &(*when)->cond));
-    (*when)->module = ctx->mod_def;
+    LY_CHECK_RET(lysc_prefixes_compile(when_p->cond, strlen(when_p->cond), ctx->mod_def, &(*when)->prefixes));
     (*when)->context = (struct lysc_node *)ctx_node;
     DUP_STRING_GOTO(ctx->ctx, when_p->dsc, (*when)->dsc, ret, done);
     DUP_STRING_GOTO(ctx->ctx, when_p->ref, (*when)->ref, ret, done);
@@ -1044,7 +1045,7 @@ lys_compile_must(struct lysc_ctx *ctx, struct lysp_restr *must_p, struct lysc_mu
     LY_ERR ret = LY_SUCCESS;
 
     LY_CHECK_RET(lyxp_expr_parse(ctx->ctx, must_p->arg.str, 0, 1, &must->cond));
-    must->module = (struct lys_module *)must_p->arg.mod;
+    LY_CHECK_RET(lysc_prefixes_compile(must_p->arg.str, strlen(must_p->arg.str), must_p->arg.pmod, &must->prefixes));
     DUP_STRING_GOTO(ctx->ctx, must_p->eapptag, must->eapptag, ret, done);
     DUP_STRING_GOTO(ctx->ctx, must_p->emsg, must->emsg, ret, done);
     DUP_STRING_GOTO(ctx->ctx, must_p->dsc, must->dsc, ret, done);
@@ -1100,7 +1101,7 @@ lys_compile_import(struct lysc_ctx *ctx, struct lysp_import *imp_p)
 }
 
 LY_ERR
-lys_identity_precompile(struct lysc_ctx *ctx_sc, struct ly_ctx *ctx, struct lys_module *module,
+lys_identity_precompile(struct lysc_ctx *ctx_sc, struct ly_ctx *ctx, struct lysp_module *pmod,
         struct lysp_ident *identities_p, struct lysc_ident **identities)
 {
     LY_ARRAY_COUNT_TYPE offset = 0, u, v;
@@ -1111,8 +1112,8 @@ lys_identity_precompile(struct lysc_ctx *ctx_sc, struct ly_ctx *ctx, struct lys_
 
     if (!ctx_sc) {
         context.ctx = ctx;
-        context.mod = module;
-        context.mod_def = module;
+        context.mod = pmod->mod;
+        context.mod_def = pmod;
         context.path_len = 1;
         context.path[0] = '/';
         ctx_sc = &context;
@@ -1214,13 +1215,14 @@ cleanup:
  * to distinguish these two use cases.
  *
  * @param[in] ctx Compile context, not only for logging but also to get the current module to resolve prefixes.
+ * @param[in] base_pmod Module where to resolve @p bases_p prefixes.
  * @param[in] bases_p Array of names (including prefix if necessary) of base identities.
  * @param[in] ident Referencing identity to work with, NULL for identityref.
  * @param[in] bases Array of bases of identityref to fill in.
  * @return LY_ERR value.
  */
 static LY_ERR
-lys_compile_identity_bases(struct lysc_ctx *ctx, const struct lys_module *context_module, const char **bases_p,
+lys_compile_identity_bases(struct lysc_ctx *ctx, const struct lysp_module *base_pmod, const char **bases_p,
         struct lysc_ident *ident, struct lysc_ident ***bases)
 {
     LY_ARRAY_COUNT_TYPE u, v;
@@ -1230,7 +1232,7 @@ lys_compile_identity_bases(struct lysc_ctx *ctx, const struct lys_module *contex
 
     assert(ident || bases);
 
-    if ((LY_ARRAY_COUNT(bases_p) > 1) && (ctx->mod_def->version < 2)) {
+    if ((LY_ARRAY_COUNT(bases_p) > 1) && (ctx->mod_def->version < LYS_VERSION_1_1)) {
         LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_SYNTAX_YANG,
                 "Multiple bases in %s are allowed only in YANG 1.1 modules.", ident ? "identity" : "identityref type");
         return LY_EVALID;
@@ -1241,10 +1243,10 @@ lys_compile_identity_bases(struct lysc_ctx *ctx, const struct lys_module *contex
         if (s) {
             /* prefixed identity */
             name = &s[1];
-            mod = lys_module_find_prefix(context_module, bases_p[u], s - bases_p[u]);
+            mod = lysp_module_find_prefix(base_pmod, bases_p[u], s - bases_p[u]);
         } else {
             name = bases_p[u];
-            mod = context_module;
+            mod = base_pmod->mod;
         }
         if (!mod) {
             if (ident) {
@@ -1310,7 +1312,7 @@ lys_compile_identities_derived(struct lysc_ctx *ctx, struct lysp_ident *idents_p
             continue;
         }
         lysc_update_path(ctx, NULL, idents[u].name);
-        LY_CHECK_RET(lys_compile_identity_bases(ctx, idents[u].module, idents_p[u].bases, &idents[u], NULL));
+        LY_CHECK_RET(lys_compile_identity_bases(ctx, idents[u].module->parsed, idents_p[u].bases, &idents[u], NULL));
         lysc_update_path(ctx, NULL, NULL);
     }
     lysc_update_path(ctx, NULL, NULL);
@@ -1318,7 +1320,7 @@ lys_compile_identities_derived(struct lysc_ctx *ctx, struct lysp_ident *idents_p
 }
 
 LY_ERR
-lys_feature_precompile(struct lysc_ctx *ctx_sc, struct ly_ctx *ctx, struct lys_module *module,
+lys_feature_precompile(struct lysc_ctx *ctx_sc, struct ly_ctx *ctx, struct lysp_module *pmod,
         struct lysp_feature *features_p, struct lysc_feature **features)
 {
     LY_ERR ret = LY_SUCCESS;
@@ -1329,7 +1331,8 @@ lys_feature_precompile(struct lysc_ctx *ctx_sc, struct ly_ctx *ctx, struct lys_m
 
     if (!ctx_sc) {
         context.ctx = ctx;
-        context.mod = module;
+        context.mod = pmod->mod;
+        context.mod_def = pmod;
         context.path_len = 1;
         context.path[0] = '/';
         ctx_sc = &context;
@@ -2353,7 +2356,7 @@ lys_compile_type_enums(struct lysc_ctx *ctx, struct lysp_type_enum *enums_p, LY_
     uint32_t position = 0;
     struct lysc_type_bitenum_item *e, storage;
 
-    if (base_enums && (ctx->mod_def->version < 2)) {
+    if (base_enums && (ctx->mod_def->version < LYS_VERSION_1_1)) {
         LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_SYNTAX_YANG, "%s type can be subtyped only in YANG 1.1 modules.",
                 basetype == LY_TYPE_ENUM ? "Enumeration" : "Bits");
         return LY_EVALID;
@@ -2791,7 +2794,7 @@ lys_compile_type_(struct lysc_ctx *ctx, struct lysp_node *context_pnode, uint16_
                 }
                 return LY_EVALID;
             }
-            LY_CHECK_RET(lys_compile_identity_bases(ctx, type_p->mod, type_p->bases, NULL, &idref->bases));
+            LY_CHECK_RET(lys_compile_identity_bases(ctx, type_p->pmod, type_p->bases, NULL, &idref->bases));
         }
 
         if (!base && !type_p->flags) {
@@ -2809,7 +2812,7 @@ lys_compile_type_(struct lysc_ctx *ctx, struct lysp_node *context_pnode, uint16_
 
         /* RFC 7950 9.9.3 - require-instance */
         if (type_p->flags & LYS_SET_REQINST) {
-            if (context_mod->mod->version < LYS_VERSION_1_1) {
+            if (context_mod->version < LYS_VERSION_1_1) {
                 if (tpdfname) {
                     LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_SEMANTICS,
                             "Leafref type \"%s\" can be restricted by require-instance statement only in YANG 1.1 modules.", tpdfname);
@@ -2829,10 +2832,11 @@ lys_compile_type_(struct lysc_ctx *ctx, struct lysp_node *context_pnode, uint16_
         }
         if (type_p->path) {
             LY_CHECK_RET(lyxp_expr_dup(ctx->ctx, type_p->path, &lref->path));
-            lref->path_mod = type_p->mod;
+            LY_CHECK_RET(lysc_prefixes_compile(type_p->path->expr, strlen(type_p->path->expr), type_p->pmod,
+                    &lref->prefixes));
         } else if (base) {
             LY_CHECK_RET(lyxp_expr_dup(ctx->ctx, ((struct lysc_type_leafref *)base)->path, &lref->path));
-            lref->path_mod = ((struct lysc_type_leafref *)base)->path_mod;
+            LY_CHECK_RET(lysc_prefixes_dup(((struct lysc_type_leafref *)base)->prefixes, &lref->prefixes));
         } else if (tpdfname) {
             LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LY_VCODE_MISSCHILDSTMT, "path", "leafref type ", tpdfname);
             return LY_EVALID;
@@ -2890,7 +2894,8 @@ lys_compile_type_(struct lysc_ctx *ctx, struct lysp_node *context_pnode, uint16_
                             LY_CHECK_RET(lyxp_expr_dup(ctx->ctx, ((struct lysc_type_leafref *)un_aux->types[v])->path, &lref->path));
                             lref->refcount = 1;
                             lref->require_instance = ((struct lysc_type_leafref *)un_aux->types[v])->require_instance;
-                            lref->path_mod = ((struct lysc_type_leafref *)un_aux->types[v])->path_mod;
+                            LY_CHECK_RET(lysc_prefixes_dup(((struct lysc_type_leafref *)un_aux->types[v])->prefixes,
+                                    &lref->prefixes));
                             /* TODO extensions */
 
                         } else {
@@ -3024,8 +3029,7 @@ lys_compile_type(struct lysc_ctx *ctx, struct lysp_node *context_pnode, uint16_t
 
     tctx = calloc(1, sizeof *tctx);
     LY_CHECK_ERR_RET(!tctx, LOGMEM(ctx->ctx), LY_EMEM);
-    for (ret = lysp_type_find(type_p->name, context_pnode, ctx->mod_def->parsed,
-            &basetype, &tctx->tpdf, &tctx->node, &tctx->mod);
+    for (ret = lysp_type_find(type_p->name, context_pnode, ctx->mod_def, &basetype, &tctx->tpdf, &tctx->node, &tctx->mod);
             ret == LY_SUCCESS;
             ret = lysp_type_find(tctx_prev->tpdf->type.name, tctx_prev->node, tctx_prev->mod,
                     &basetype, &tctx->tpdf, &tctx->node, &tctx->mod)) {
@@ -3046,7 +3050,6 @@ lys_compile_type(struct lysc_ctx *ctx, struct lysp_node *context_pnode, uint16_t
         if (dflt && !*dflt && tctx->tpdf->dflt.str) {
             /* inherit default */
             *dflt = (struct lysp_qname *)&tctx->tpdf->dflt;
-            assert((*dflt)->mod);
         }
         if (dummyloops && (!units || *units) && dflt && *dflt) {
             basetype = ((struct type_context *)tpdf_chain.objs[tpdf_chain.count - 1])->tpdf->type.compiled->basetype;
@@ -3686,7 +3689,7 @@ lys_compile_node_type(struct lysc_ctx *ctx, struct lysp_node *context_node, stru
 {
     struct lysp_qname *dflt;
 
-    LY_CHECK_RET(lys_compile_type(ctx, context_node, leaf->flags, ctx->mod_def->parsed, leaf->name, type_p, &leaf->type,
+    LY_CHECK_RET(lys_compile_type(ctx, context_node, leaf->flags, ctx->mod_def, leaf->name, type_p, &leaf->type,
             leaf->units ? NULL : &leaf->units, &dflt));
 
     /* store default value, if any */
@@ -3839,7 +3842,8 @@ done:
  * @param[in] nodeid_len Length of the given nodeid, if it is not NULL-terminated string.
  * @param[in] context_node Node where the nodeid is specified to correctly resolve prefixes and to start searching.
  * If no context node is provided, the nodeid is actually expected to be the absolute schema node .
- * @param[in] context_module Explicit module to resolve prefixes in @nodeid.
+ * @param[in] format Format of any prefixes.
+ * @param[in] prefix_data Format-specific prefix data (see ::ly_resolve_prefix).
  * @param[in] nodetype Optional (can be 0) restriction for target's nodetype. If target exists, but does not match
  * the given nodetype, LY_EDENIED is returned (and target is provided), but no error message is printed.
  * The value can be even an ORed value to allow multiple nodetypes.
@@ -3850,7 +3854,7 @@ done:
  */
 static LY_ERR
 lysc_resolve_schema_nodeid(struct lysc_ctx *ctx, const char *nodeid, size_t nodeid_len, const struct lysc_node *context_node,
-        const struct lys_module *context_module, uint16_t nodetype, const struct lysc_node **target, uint16_t *result_flag)
+        LY_PREFIX_FORMAT format, void *prefix_data, uint16_t nodetype, const struct lysc_node **target, uint16_t *result_flag)
 {
     LY_ERR ret = LY_EVALID;
     const char *name, *prefix, *id;
@@ -3861,6 +3865,7 @@ lysc_resolve_schema_nodeid(struct lysc_ctx *ctx, const char *nodeid, size_t node
     uint16_t current_nodetype = 0;
 
     assert(nodeid);
+    assert(format != LY_PREF_JSON);
     assert(target);
     assert(result_flag);
     *target = NULL;
@@ -3892,16 +3897,14 @@ lysc_resolve_schema_nodeid(struct lysc_ctx *ctx, const char *nodeid, size_t node
     }
 
     while (*id && (ret = ly_parse_nodeid(&id, &prefix, &prefix_len, &name, &name_len)) == LY_SUCCESS) {
-        if (prefix) {
-            mod = lys_module_find_prefix(context_module, prefix, prefix_len);
-            if (!mod) {
-                LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
-                        "Invalid %s-schema-nodeid value \"%.*s\" - prefix \"%.*s\" not defined in module \"%s\".",
-                        nodeid_type, id - nodeid, nodeid, prefix_len, prefix, context_module->name);
-                return LY_ENOTFOUND;
-            }
-        } else {
-            mod = context_module;
+        mod = ly_resolve_prefix(ctx->ctx, prefix, prefix_len, format, prefix_data);
+        if (!mod) {
+            /* local module must always be found */
+            assert(prefix);
+            LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
+                    "Invalid %s-schema-nodeid value \"%.*s\" - prefix \"%.*s\" not defined in module \"%s\".",
+                    nodeid_type, id - nodeid, nodeid, prefix_len, prefix, LYSP_MODULE_NAME(ctx->mod_def));
+            return LY_ENOTFOUND;
         }
         if (context_node && (context_node->nodetype & (LYS_RPC | LYS_ACTION))) {
             /* move through input/output manually */
@@ -4001,8 +4004,8 @@ lys_compile_node_list_unique(struct lysc_ctx *ctx, struct lysp_qname *uniques, s
 
             /* unique node must be present */
             LY_ARRAY_NEW_RET(ctx->ctx, *unique, key, LY_EMEM);
-            ret = lysc_resolve_schema_nodeid(ctx, keystr, len, (struct lysc_node *)list, uniques[v].mod, LYS_LEAF,
-                    (const struct lysc_node **)key, &flags);
+            ret = lysc_resolve_schema_nodeid(ctx, keystr, len, (struct lysc_node *)list, LY_PREF_SCHEMA,
+                    (void *)uniques[v].pmod, LYS_LEAF, (const struct lysc_node **)key, &flags);
             if (ret != LY_SUCCESS) {
                 if (ret == LY_EDENIED) {
                     LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
@@ -4258,10 +4261,10 @@ lys_compile_node_choice_dflt(struct lysc_ctx *ctx, struct lysp_qname *dflt, stru
         name = dflt->str;
     }
     if (prefix) {
-        mod = ly_resolve_prefix(ctx->ctx, prefix, prefix_len, LY_PREF_SCHEMA, (void *)dflt->mod);
+        mod = ly_resolve_prefix(ctx->ctx, prefix, prefix_len, LY_PREF_SCHEMA, (void *)dflt->pmod);
         if (!mod) {
-            LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
-                    "Default case prefix \"%.*s\" not found in imports of \"%s\".", prefix_len, prefix, dflt->mod->name);
+            LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE, "Default case prefix \"%.*s\" not found "
+                    "in imports of \"%s\".", prefix_len, prefix, LYSP_MODULE_NAME(dflt->pmod));
             return LY_EVALID;
         }
     } else {
@@ -4742,67 +4745,70 @@ cleanup:
  * @param[in] ctx Compile context.
  * @param[in] uses_p Parsed uses node.
  * @param[out] gpr_p Found grouping on success.
- * @param[out] grp_mod Module of @p grp_p on success.
+ * @param[out] grp_pmod Module of @p grp_p on success.
  * @return LY_ERR value.
  */
 static LY_ERR
 lys_compile_uses_find_grouping(struct lysc_ctx *ctx, struct lysp_node_uses *uses_p, struct lysp_grp **grp_p,
-        struct lys_module **grp_mod)
+        struct lysp_module **grp_pmod)
 {
     struct lysp_node *pnode;
     struct lysp_grp *grp;
     LY_ARRAY_COUNT_TYPE u, v;
-    ly_bool found = 0;
-    const char *id, *name, *prefix;
+    const char *id, *name, *prefix, *local_pref;
     size_t prefix_len, name_len;
+    struct lysp_module *pmod, *found = NULL;
     struct lys_module *mod;
 
     *grp_p = NULL;
-    *grp_mod = NULL;
+    *grp_pmod = NULL;
 
     /* search for the grouping definition */
     id = uses_p->name;
     LY_CHECK_RET(ly_parse_nodeid(&id, &prefix, &prefix_len, &name, &name_len), LY_EVALID);
-    if (prefix) {
-        mod = lys_module_find_prefix(ctx->mod_def, prefix, prefix_len);
-        if (!mod) {
-            LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
-                    "Invalid prefix used for grouping reference.", uses_p->name);
-            return LY_EVALID;
-        }
-    } else {
-        mod = ctx->mod_def;
-    }
-    if (mod == ctx->mod_def) {
+    local_pref = ctx->mod_def->is_submod ? ((struct lysp_submodule *)ctx->mod_def)->prefix : ctx->mod_def->mod->prefix;
+    if (!prefix || !ly_strncmp(local_pref, prefix, prefix_len)) {
+        /* local module, search local groupings first */
+        pmod = ctx->mod_def;
         for (pnode = uses_p->parent; !found && pnode; pnode = pnode->parent) {
             grp = (struct lysp_grp *)lysp_node_groupings(pnode);
             LY_ARRAY_FOR(grp, u) {
                 if (!strcmp(grp[u].name, name)) {
                     grp = &grp[u];
-                    found = 1;
+                    found = ctx->mod_def;
                     break;
                 }
             }
         }
+    } else {
+        /* foreign module, find it first */
+        mod = lysp_module_find_prefix(ctx->mod_def, prefix, prefix_len);
+        if (!mod) {
+            LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_REFERENCE,
+                    "Invalid prefix used for grouping reference.", uses_p->name);
+            return LY_EVALID;
+        }
+        pmod = mod->parsed;
     }
+
     if (!found) {
         /* search in top-level groupings of the main module ... */
-        grp = mod->parsed->groupings;
+        grp = pmod->groupings;
         LY_ARRAY_FOR(grp, u) {
             if (!strcmp(grp[u].name, name)) {
                 grp = &grp[u];
-                found = 1;
+                found = pmod;
                 break;
             }
         }
         if (!found) {
             /* ... and all the submodules */
-            LY_ARRAY_FOR(mod->parsed->includes, u) {
-                grp = mod->parsed->includes[u].submodule->groupings;
+            LY_ARRAY_FOR(pmod->includes, u) {
+                grp = pmod->includes[u].submodule->groupings;
                 LY_ARRAY_FOR(grp, v) {
                     if (!strcmp(grp[v].name, name)) {
                         grp = &grp[v];
-                        found = 1;
+                        found = (struct lysp_module *)pmod->includes[u].submodule;
                         break;
                     }
                 }
@@ -4824,12 +4830,12 @@ lys_compile_uses_find_grouping(struct lysc_ctx *ctx, struct lysp_node_uses *uses
     }
 
     *grp_p = grp;
-    *grp_mod = mod;
+    *grp_pmod = found;
     return LY_SUCCESS;
 }
 
 static const struct lys_module *lys_schema_node_get_module(const struct ly_ctx *ctx, const char *nametest,
-        size_t nametest_len, const struct lys_module *local_mod, const char **name, size_t *name_len);
+        size_t nametest_len, const struct lysp_module *local_pmod, const char **name, size_t *name_len);
 
 static LY_ERR
 lys_nodeid_check(struct lysc_ctx *ctx, const char *nodeid, ly_bool abs, struct lys_module **target_mod,
@@ -4918,14 +4924,14 @@ cleanup:
  *
  * @param[in] ctx libyang context.
  * @param[in] exp1 First schema nodeid.
- * @param[in] exp1_mod Module of @p exp1 nodes without any prefix.
+ * @param[in] exp1p_mod Module of @p exp1 nodes without any prefix.
  * @param[in] exp2 Second schema nodeid.
- * @param[in] exp2_mod Module of @p exp2 nodes without any prefix.
+ * @param[in] exp2_pmod Module of @p exp2 nodes without any prefix.
  * @return Whether the schema nodeids match or not.
  */
 static ly_bool
-lys_abs_schema_nodeid_match(const struct ly_ctx *ctx, const struct lyxp_expr *exp1, const struct lys_module *exp1_mod,
-        const struct lyxp_expr *exp2, const struct lys_module *exp2_mod)
+lys_abs_schema_nodeid_match(const struct ly_ctx *ctx, const struct lyxp_expr *exp1, const struct lysp_module *exp1_pmod,
+        const struct lyxp_expr *exp2, const struct lysp_module *exp2_pmod)
 {
     uint32_t i;
     const struct lys_module *mod1, *mod2;
@@ -4941,10 +4947,10 @@ lys_abs_schema_nodeid_match(const struct ly_ctx *ctx, const struct lyxp_expr *ex
 
         if (exp1->tokens[i] == LYXP_TOKEN_NAMETEST) {
             /* check modules of all the nodes in the node ID */
-            mod1 = lys_schema_node_get_module(ctx, exp1->expr + exp1->tok_pos[i], exp1->tok_len[i], exp1_mod,
+            mod1 = lys_schema_node_get_module(ctx, exp1->expr + exp1->tok_pos[i], exp1->tok_len[i], exp1_pmod,
                     &name1, &name1_len);
             assert(mod1);
-            mod2 = lys_schema_node_get_module(ctx, exp2->expr + exp2->tok_pos[i], exp2->tok_len[i], exp2_mod,
+            mod2 = lys_schema_node_get_module(ctx, exp2->expr + exp2->tok_pos[i], exp2->tok_len[i], exp2_pmod,
                     &name2, &name2_len);
             assert(mod2);
 
@@ -4996,6 +5002,7 @@ lys_precompile_uses_augments_refines(struct lysc_ctx *ctx, struct lysp_node_uses
 
         aug->nodeid = exp;
         exp = NULL;
+        aug->nodeid_pmod = ctx->mod_def;
         aug->nodeid_ctx_node = ctx_node;
         aug->aug_p = &uses_p->augments[u];
 
@@ -5028,6 +5035,7 @@ lys_precompile_uses_augments_refines(struct lysc_ctx *ctx, struct lysp_node_uses
 
             rfn->nodeid = exp;
             exp = NULL;
+            rfn->nodeid_pmod = ctx->mod_def;
             rfn->nodeid_ctx_node = ctx_node;
         } else {
             /* just free exp */
@@ -5066,7 +5074,7 @@ lys_compile_uses(struct lysc_ctx *ctx, struct lysp_node_uses *uses_p, struct lys
     struct lysc_node *child;
     struct lysp_grp *grp = NULL;
     uint32_t i, grp_stack_count;
-    struct lys_module *grp_mod, *mod_old = ctx->mod_def;
+    struct lysp_module *grp_mod, *mod_old = ctx->mod_def;
     LY_ERR ret = LY_SUCCESS;
     struct lysc_when *when_shared = NULL;
     LY_ARRAY_COUNT_TYPE u;
@@ -5373,7 +5381,7 @@ lysp_restr_dup(const struct ly_ctx *ctx, struct lysp_restr *restr, const struct 
 
     if (orig_restr) {
         DUP_STRING(ctx, orig_restr->arg.str, restr->arg.str, ret);
-        restr->arg.mod = orig_restr->arg.mod;
+        restr->arg.pmod = orig_restr->arg.pmod;
         DUP_STRING(ctx, orig_restr->emsg, restr->emsg, ret);
         DUP_STRING(ctx, orig_restr->eapptag, restr->eapptag, ret);
         DUP_STRING(ctx, orig_restr->dsc, restr->dsc, ret);
@@ -5404,8 +5412,8 @@ lysp_qname_dup(const struct ly_ctx *ctx, struct lysp_qname *qname, const struct 
     }
 
     DUP_STRING(ctx, orig_qname->str, qname->str, ret);
-    assert(orig_qname->mod);
-    qname->mod = orig_qname->mod;
+    assert(orig_qname->pmod);
+    qname->pmod = orig_qname->pmod;
 
     return ret;
 }
@@ -5453,7 +5461,7 @@ lysp_type_dup(const struct ly_ctx *ctx, struct lysp_type *type, const struct lys
     DUP_ARRAY(ctx, orig_type->types, type->types, lysp_type_dup);
     DUP_ARRAY(ctx, orig_type->exts, type->exts, lysp_ext_dup);
 
-    type->mod = orig_type->mod;
+    type->pmod = orig_type->pmod;
     type->compiled = orig_type->compiled;
 
     type->fraction_digits = orig_type->fraction_digits;
@@ -5794,11 +5802,10 @@ lys_apply_refine(struct lysc_ctx *ctx, struct lysp_refine *rfn, struct lysp_node
             AMEND_CHECK_CARDINALITY(rfn->dflts, 1, "refine", "default");
 
             FREE_STRING(ctx->ctx, ((struct lysp_node_leaf *)target)->dflt.str);
-            DUP_STRING_GOTO(ctx->ctx, rfn->dflts[0], ((struct lysp_node_leaf *)target)->dflt.str, ret, cleanup);
-            ((struct lysp_node_leaf *)target)->dflt.mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, &((struct lysp_node_leaf *)target)->dflt, &rfn->dflts[0]), cleanup);
             break;
         case LYS_LEAFLIST:
-            if (ctx->mod->version < LYS_VERSION_1_1) {
+            if (rfn->dflts[0].pmod->version < LYS_VERSION_1_1) {
                 LOGVAL(ctx->ctx, LY_VLOG_STR, ctx->path, LYVE_SEMANTICS,
                         "Invalid refine of default in leaf-list - the default statement is allowed only in YANG 1.1 modules.");
                 ret = LY_EVALID;
@@ -5809,16 +5816,14 @@ lys_apply_refine(struct lysc_ctx *ctx, struct lysp_refine *rfn, struct lysp_node
             ((struct lysp_node_leaflist *)target)->dflts = NULL;
             LY_ARRAY_FOR(rfn->dflts, u) {
                 LY_ARRAY_NEW_GOTO(ctx->ctx, ((struct lysp_node_leaflist *)target)->dflts, qname, ret, cleanup);
-                DUP_STRING_GOTO(ctx->ctx, rfn->dflts[u], qname->str, ret, cleanup);
-                qname->mod = ctx->mod;
+                LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, qname, &rfn->dflts[u]), cleanup);
             }
             break;
         case LYS_CHOICE:
             AMEND_CHECK_CARDINALITY(rfn->dflts, 1, "refine", "default");
 
             FREE_STRING(ctx->ctx, ((struct lysp_node_choice *)target)->dflt.str);
-            DUP_STRING_GOTO(ctx->ctx, rfn->dflts[0], ((struct lysp_node_choice *)target)->dflt.str, ret, cleanup);
-            ((struct lysp_node_choice *)target)->dflt.mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, &((struct lysp_node_choice *)target)->dflt, &rfn->dflts[0]), cleanup);
             break;
         default:
             AMEND_WRONG_NODETYPE("refine", "replace", "default");
@@ -5948,8 +5953,7 @@ lys_apply_refine(struct lysc_ctx *ctx, struct lysp_refine *rfn, struct lysp_node
 
         LY_ARRAY_FOR(rfn->iffeatures, u) {
             LY_ARRAY_NEW_GOTO(ctx->ctx, target->iffeatures, qname, ret, cleanup);
-            DUP_STRING_GOTO(ctx->ctx, rfn->iffeatures[u].str, qname->str, ret, cleanup);
-            qname->mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, qname, &rfn->iffeatures[u]), cleanup);
         }
     }
 
@@ -6039,8 +6043,7 @@ lys_apply_deviate_add(struct lysc_ctx *ctx, struct lysp_deviate_add *d, struct l
 
         LY_ARRAY_FOR(d->uniques, u) {
             LY_ARRAY_NEW_GOTO(ctx->ctx, ((struct lysp_node_list *)target)->uniques, qname, ret, cleanup);
-            DUP_STRING_GOTO(ctx->ctx, d->uniques[u], qname->str, ret, cleanup);
-            qname->mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, qname, &d->uniques[u]), cleanup);
         }
     }
 
@@ -6051,22 +6054,19 @@ lys_apply_deviate_add(struct lysc_ctx *ctx, struct lysp_deviate_add *d, struct l
             AMEND_CHECK_CARDINALITY(d->dflts, 1, "deviation", "default");
             DEV_CHECK_NONPRESENCE(struct lysp_node_leaf *, dflt.str, "default", dflt.str);
 
-            DUP_STRING_GOTO(ctx->ctx, d->dflts[0], ((struct lysp_node_leaf *)target)->dflt.str, ret, cleanup);
-            ((struct lysp_node_leaf *)target)->dflt.mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, &((struct lysp_node_leaf *)target)->dflt, &d->dflts[0]), cleanup);
             break;
         case LYS_LEAFLIST:
             LY_ARRAY_FOR(d->dflts, u) {
                 LY_ARRAY_NEW_GOTO(ctx->ctx, ((struct lysp_node_leaflist *)target)->dflts, qname, ret, cleanup);
-                DUP_STRING_GOTO(ctx->ctx, d->dflts[u], qname->str, ret, cleanup);
-                qname->mod = ctx->mod;
+                LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, qname, &d->dflts[u]), cleanup);
             }
             break;
         case LYS_CHOICE:
             AMEND_CHECK_CARDINALITY(d->dflts, 1, "deviation", "default");
             DEV_CHECK_NONPRESENCE(struct lysp_node_choice *, dflt.str, "default", dflt.str);
 
-            DUP_STRING_GOTO(ctx->ctx, d->dflts[0], ((struct lysp_node_choice *)target)->dflt.str, ret, cleanup);
-            ((struct lysp_node_choice *)target)->dflt.mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, &((struct lysp_node_choice *)target)->dflt, &d->dflts[0]), cleanup);
             break;
         default:
             AMEND_WRONG_NODETYPE("deviation", "add", "default");
@@ -6282,7 +6282,7 @@ lys_apply_deviate_delete(struct lysc_ctx *ctx, struct lysp_deviate_del *d, struc
         }
 
         uniques = &((struct lysp_node_list *)target)->uniques;
-        DEV_DEL_ARRAY(uniques, *uniques, , .str, lysp_qname_free, "unique");
+        DEV_DEL_ARRAY(uniques, *uniques, .str, .str, lysp_qname_free, "unique");
     }
 
     /* *default-stmt */
@@ -6290,18 +6290,18 @@ lys_apply_deviate_delete(struct lysc_ctx *ctx, struct lysp_deviate_del *d, struc
         switch (target->nodetype) {
         case LYS_LEAF:
             AMEND_CHECK_CARDINALITY(d->dflts, 1, "deviation", "default");
-            DEV_CHECK_PRESENCE_VALUE(struct lysp_node_leaf *, dflt.str, "deleting", "default", d->dflts[0]);
+            DEV_CHECK_PRESENCE_VALUE(struct lysp_node_leaf *, dflt.str, "deleting", "default", d->dflts[0].str);
 
             FREE_STRING(ctx->ctx, ((struct lysp_node_leaf *)target)->dflt.str);
             ((struct lysp_node_leaf *)target)->dflt.str = NULL;
             break;
         case LYS_LEAFLIST:
             dflts = &((struct lysp_node_leaflist *)target)->dflts;
-            DEV_DEL_ARRAY(dflts, *dflts, , .str, lysp_qname_free, "default");
+            DEV_DEL_ARRAY(dflts, *dflts, .str, .str, lysp_qname_free, "default");
             break;
         case LYS_CHOICE:
             AMEND_CHECK_CARDINALITY(d->dflts, 1, "deviation", "default");
-            DEV_CHECK_PRESENCE_VALUE(struct lysp_node_choice *, dflt.str, "deleting", "default", d->dflts[0]);
+            DEV_CHECK_PRESENCE_VALUE(struct lysp_node_choice *, dflt.str, "deleting", "default", d->dflts[0].str);
 
             FREE_STRING(ctx->ctx, ((struct lysp_node_choice *)target)->dflt.str);
             ((struct lysp_node_choice *)target)->dflt.str = NULL;
@@ -6366,21 +6366,19 @@ lys_apply_deviate_replace(struct lysc_ctx *ctx, struct lysp_deviate_rpl *d, stru
     }
 
     /* [default-stmt] */
-    if (d->dflt) {
+    if (d->dflt.str) {
         switch (target->nodetype) {
         case LYS_LEAF:
-            DEV_CHECK_PRESENCE(struct lysp_node_leaf *, dflt.str, "replacing", "default", d->dflt);
+            DEV_CHECK_PRESENCE(struct lysp_node_leaf *, dflt.str, "replacing", "default", d->dflt.str);
 
             FREE_STRING(ctx->ctx, ((struct lysp_node_leaf *)target)->dflt.str);
-            DUP_STRING_GOTO(ctx->ctx, d->dflt, ((struct lysp_node_leaf *)target)->dflt.str, ret, cleanup);
-            ((struct lysp_node_leaf *)target)->dflt.mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, &((struct lysp_node_leaf *)target)->dflt, &d->dflt), cleanup);
             break;
         case LYS_CHOICE:
             DEV_CHECK_PRESENCE(struct lysp_node_choice *, dflt.str, "replacing", "default", d->dflt);
 
             FREE_STRING(ctx->ctx, ((struct lysp_node_choice *)target)->dflt.str);
-            DUP_STRING_GOTO(ctx->ctx, d->dflt, ((struct lysp_node_choice *)target)->dflt.str, ret, cleanup);
-            ((struct lysp_node_choice *)target)->dflt.mod = ctx->mod;
+            LY_CHECK_GOTO(ret = lysp_qname_dup(ctx->ctx, &((struct lysp_node_choice *)target)->dflt, &d->dflt), cleanup);
             break;
         default:
             AMEND_WRONG_NODETYPE("deviation", "replace", "default");
@@ -6492,25 +6490,25 @@ cleanup:
  * @param[in] ctx libyang context.
  * @param[in] nametest Nametest with an optional prefix.
  * @param[in] nametest_len Length of @p nametest.
- * @param[in] local_mod Module to return in case of no prefix.
+ * @param[in] local_pmod Module to return in case of no prefix (or its main module for submodules).
  * @param[out] name Optional pointer to the name test without the prefix.
  * @param[out] name_len Length of @p name.
  * @return Resolved module.
  */
 static const struct lys_module *
 lys_schema_node_get_module(const struct ly_ctx *ctx, const char *nametest, size_t nametest_len,
-        const struct lys_module *local_mod, const char **name, size_t *name_len)
+        const struct lysp_module *local_pmod, const char **name, size_t *name_len)
 {
     const struct lys_module *target_mod;
     const char *ptr;
 
     ptr = ly_strnchr(nametest, ':', nametest_len);
     if (ptr) {
-        target_mod = ly_resolve_prefix(ctx, nametest, ptr - nametest, LY_PREF_SCHEMA, (void *)local_mod);
+        target_mod = ly_resolve_prefix(ctx, nametest, ptr - nametest, LY_PREF_SCHEMA, (void *)local_pmod);
         if (!target_mod) {
             LOGVAL(ctx, LY_VLOG_NONE, NULL, LYVE_REFERENCE,
                     "Invalid absolute-schema-nodeid nametest \"%.*s\" - prefix \"%.*s\" not defined in module \"%s\".",
-                    nametest_len, nametest, ptr - nametest, nametest, local_mod->name);
+                    nametest_len, nametest, ptr - nametest, nametest, LYSP_MODULE_NAME(local_pmod));
             return NULL;
         }
 
@@ -6519,7 +6517,7 @@ lys_schema_node_get_module(const struct ly_ctx *ctx, const char *nametest, size_
             *name_len = nametest_len - ((ptr - nametest) + 1);
         }
     } else {
-        target_mod = local_mod;
+        target_mod = local_pmod->mod;
         if (name) {
             *name = nametest;
             *name_len = nametest_len;
@@ -6631,7 +6629,7 @@ lysp_schema_nodeid_match_node(const struct lysc_node **node, const struct lys_mo
  * @brief Check whether a node matches specific schema nodeid.
  *
  * @param[in] exp Parsed nodeid to match.
- * @param[in] exp_mod Module to use for nodes in @p exp without a prefix.
+ * @param[in] exp_pmod Module to use for nodes in @p exp without a prefix.
  * @param[in] ctx_node Initial context node that should match, only for descendant paths.
  * @param[in] parent First compiled parent to consider. If @p pnode is NULL, it is condered the node to be matched.
  * @param[in] pnode Parsed node to be matched. May be NULL if the target node was already compiled.
@@ -6639,7 +6637,7 @@ lysp_schema_nodeid_match_node(const struct lysc_node **node, const struct lys_mo
  * @return Whether it is a match or not.
  */
 static ly_bool
-lysp_schema_nodeid_match(const struct lyxp_expr *exp, const struct lys_module *exp_mod, const struct lysc_node *ctx_node,
+lysp_schema_nodeid_match(const struct lyxp_expr *exp, const struct lysp_module *exp_pmod, const struct lysc_node *ctx_node,
         const struct lysc_node *parent, const struct lysp_node *pnode, const struct lys_module *pnode_mod)
 {
     uint32_t i;
@@ -6651,7 +6649,7 @@ lysp_schema_nodeid_match(const struct lyxp_expr *exp, const struct lys_module *e
     i = exp->used - 1;
 
     /* get exp node ID module */
-    mod = lys_schema_node_get_module(exp_mod->ctx, exp->expr + exp->tok_pos[i], exp->tok_len[i], exp_mod, &name, &name_len);
+    mod = lys_schema_node_get_module(exp_pmod->mod->ctx, exp->expr + exp->tok_pos[i], exp->tok_len[i], exp_pmod, &name, &name_len);
     assert(mod);
 
     if (pnode) {
@@ -6677,7 +6675,7 @@ lysp_schema_nodeid_match(const struct lyxp_expr *exp, const struct lys_module *e
         }
 
         /* get exp node ID module */
-        mod = lys_schema_node_get_module(exp_mod->ctx, exp->expr + exp->tok_pos[i], exp->tok_len[i], exp_mod, &name,
+        mod = lys_schema_node_get_module(exp_pmod->mod->ctx, exp->expr + exp->tok_pos[i], exp->tok_len[i], exp_pmod, &name,
                 &name_len);
         assert(mod);
 
@@ -6714,7 +6712,7 @@ lysc_deviation_free(const struct ly_ctx *ctx, struct lysc_deviation *dev)
     if (dev) {
         lyxp_expr_free(ctx, dev->nodeid);
         LY_ARRAY_FREE(dev->devs);
-        LY_ARRAY_FREE(dev->dev_mods);
+        LY_ARRAY_FREE(dev->dev_pmods);
 
         free(dev);
     }
@@ -6800,7 +6798,8 @@ lys_compile_node_deviations_refines(struct lysc_ctx *ctx, const struct lysp_node
     LY_ERR ret = LY_SUCCESS;
     uint32_t i;
     LY_ARRAY_COUNT_TYPE u;
-    struct lys_module *orig_mod = ctx->mod, *orig_mod_def = ctx->mod_def;
+    struct lys_module *orig_mod = ctx->mod;
+    struct lysp_module *orig_mod_def = ctx->mod_def;
     char orig_path[LYSC_CTX_BUFSIZE];
     struct lysc_refine *rfn;
     struct lysc_deviation *dev;
@@ -6813,7 +6812,7 @@ lys_compile_node_deviations_refines(struct lysc_ctx *ctx, const struct lysp_node
     for (i = 0; i < ctx->uses_rfns.count; ++i) {
         rfn = ctx->uses_rfns.objs[i];
 
-        if (!lysp_schema_nodeid_match(rfn->nodeid, ctx->mod, rfn->nodeid_ctx_node, parent, pnode, ctx->mod)) {
+        if (!lysp_schema_nodeid_match(rfn->nodeid, rfn->nodeid_pmod, rfn->nodeid_ctx_node, parent, pnode, ctx->mod)) {
             /* not our target node */
             continue;
         }
@@ -6845,7 +6844,7 @@ lys_compile_node_deviations_refines(struct lysc_ctx *ctx, const struct lysp_node
     for (i = 0; i < ctx->devs.count; ++i) {
         dev = ctx->devs.objs[i];
 
-        if (!lysp_schema_nodeid_match(dev->nodeid, dev->nodeid_mod, NULL, parent, pnode, ctx->mod_def)) {
+        if (!lysp_schema_nodeid_match(dev->nodeid, dev->nodeid_pmod, NULL, parent, pnode, ctx->mod)) {
             /* not our target node */
             continue;
         }
@@ -6868,8 +6867,8 @@ lys_compile_node_deviations_refines(struct lysc_ctx *ctx, const struct lysp_node
                 /* generate correct path */
                 strcpy(orig_path, ctx->path);
                 ctx->path_len = 1;
-                ctx->mod = (struct lys_module *)dev->dev_mods[u];
-                ctx->mod_def = (struct lys_module *)dev->dev_mods[u];
+                ctx->mod = dev->dev_pmods[u]->mod;
+                ctx->mod_def = (struct lysp_module *)dev->dev_pmods[u];
                 lysc_update_path(ctx, NULL, "{deviation}");
                 lysc_update_path(ctx, NULL, dev_p->nodeid);
 
@@ -6927,7 +6926,8 @@ static LY_ERR
 lys_compile_node_augments(struct lysc_ctx *ctx, struct lysc_node *node)
 {
     LY_ERR ret = LY_SUCCESS;
-    struct lys_module *orig_mod = ctx->mod, *orig_mod_def = ctx->mod_def;
+    struct lys_module *orig_mod = ctx->mod;
+    struct lysp_module *orig_mod_def = ctx->mod_def;
     uint32_t i;
     char orig_path[LYSC_CTX_BUFSIZE];
     struct lysc_augment *aug;
@@ -6936,7 +6936,7 @@ lys_compile_node_augments(struct lysc_ctx *ctx, struct lysc_node *node)
     for (i = 0; i < ctx->uses_augs.count; ) {
         aug = ctx->uses_augs.objs[i];
 
-        if (!lysp_schema_nodeid_match(aug->nodeid, ctx->mod, aug->nodeid_ctx_node, node, NULL, NULL)) {
+        if (!lysp_schema_nodeid_match(aug->nodeid, aug->nodeid_pmod, aug->nodeid_ctx_node, node, NULL, NULL)) {
             /* not our target node */
             ++i;
             continue;
@@ -6959,7 +6959,7 @@ lys_compile_node_augments(struct lysc_ctx *ctx, struct lysc_node *node)
     for (i = 0; i < ctx->augs.count; ) {
         aug = ctx->augs.objs[i];
 
-        if (!lysp_schema_nodeid_match(aug->nodeid, aug->nodeid_mod, NULL, node, NULL, NULL)) {
+        if (!lysp_schema_nodeid_match(aug->nodeid, aug->nodeid_pmod, NULL, node, NULL, NULL)) {
             /* not our target node */
             ++i;
             continue;
@@ -6970,8 +6970,8 @@ lys_compile_node_augments(struct lysc_ctx *ctx, struct lysc_node *node)
         ctx->path_len = 1;
         lysc_update_path(ctx, NULL, "{augment}");
         lysc_update_path(ctx, NULL, aug->aug_p->nodeid);
-        ctx->mod = (struct lys_module *)aug->nodeid_mod;
-        ctx->mod_def = (struct lys_module *)aug->nodeid_mod;
+        ctx->mod = aug->nodeid_pmod->mod;
+        ctx->mod_def = (struct lysp_module *)aug->nodeid_pmod;
         ret = lys_compile_augment(ctx, aug->aug_p, node);
         strcpy(ctx->path, orig_path);
         ctx->path_len = strlen(ctx->path);
@@ -6993,11 +6993,11 @@ cleanup:
  *
  * @param[in] ctx Compile context.
  * @param[in] aug_p Parsed augment to be applied.
- * @param[in] mod_def Local module for @p aug_p.
+ * @param[in] pmod Local module for @p aug_p.
  * @return LY_ERR value.
  */
 static LY_ERR
-lys_precompile_own_augment(struct lysc_ctx *ctx, struct lysp_augment *aug_p, const struct lys_module *mod_def)
+lys_precompile_own_augment(struct lysc_ctx *ctx, struct lysp_augment *aug_p, const struct lysp_module *pmod)
 {
     LY_ERR ret = LY_SUCCESS;
     struct lyxp_expr *exp = NULL;
@@ -7008,7 +7008,7 @@ lys_precompile_own_augment(struct lysc_ctx *ctx, struct lysp_augment *aug_p, con
     ret = lyxp_expr_parse(ctx->ctx, aug_p->nodeid, strlen(aug_p->nodeid), 0, &exp);
     LY_CHECK_GOTO(ret, cleanup);
 
-    mod = lys_schema_node_get_module(ctx->ctx, exp->expr + exp->tok_pos[1], exp->tok_len[1], mod_def, NULL, NULL);
+    mod = lys_schema_node_get_module(ctx->ctx, exp->expr + exp->tok_pos[1], exp->tok_len[1], pmod, NULL, NULL);
     LY_CHECK_ERR_GOTO(!mod, LOGINT(ctx->ctx); ret = LY_EINT, cleanup);
     if (mod != ctx->mod) {
         /* augment for another module, ignore */
@@ -7022,7 +7022,7 @@ lys_precompile_own_augment(struct lysc_ctx *ctx, struct lysp_augment *aug_p, con
 
     aug->nodeid = exp;
     exp = NULL;
-    aug->nodeid_mod = mod_def;
+    aug->nodeid_pmod = pmod;
     aug->aug_p = aug_p;
 
 cleanup:
@@ -7047,13 +7047,14 @@ lys_precompile_own_augments(struct lysc_ctx *ctx)
 
         /* collect all module augments */
         LY_ARRAY_FOR(aug_mod->parsed->augments, v) {
-            LY_CHECK_RET(lys_precompile_own_augment(ctx, &aug_mod->parsed->augments[v], aug_mod));
+            LY_CHECK_RET(lys_precompile_own_augment(ctx, &aug_mod->parsed->augments[v], aug_mod->parsed));
         }
 
         /* collect all submodules augments */
         LY_ARRAY_FOR(aug_mod->parsed->includes, v) {
             LY_ARRAY_FOR(aug_mod->parsed->includes[v].submodule->augments, w) {
-                LY_CHECK_RET(lys_precompile_own_augment(ctx, &aug_mod->parsed->includes[v].submodule->augments[w], aug_mod));
+                LY_CHECK_RET(lys_precompile_own_augment(ctx, &aug_mod->parsed->includes[v].submodule->augments[w],
+                        (struct lysp_module *)aug_mod->parsed->includes[v].submodule));
             }
         }
     }
@@ -7066,24 +7067,25 @@ lys_precompile_own_augments(struct lysc_ctx *ctx)
  *
  * @param[in] ctx Compile context.
  * @param[in] dev_p Parsed deviation to be applied.
- * @param[in] mod_def Local module for @p dev_p.
+ * @param[in] pmod Local module for @p dev_p.
  * @return LY_ERR value.
  */
 static LY_ERR
-lys_precompile_own_deviation(struct lysc_ctx *ctx, struct lysp_deviation *dev_p, const struct lys_module *mod_def)
+lys_precompile_own_deviation(struct lysc_ctx *ctx, struct lysp_deviation *dev_p, const struct lysp_module *pmod)
 {
     LY_ERR ret = LY_SUCCESS;
     struct lysc_deviation *dev = NULL;
     struct lyxp_expr *exp = NULL;
     struct lysp_deviation **new_dev;
-    const struct lys_module *mod, **new_dev_mod;
+    const struct lys_module *mod;
+    const struct lysp_module **new_dev_pmod;
     uint32_t i;
 
     /* parse its target, it was already parsed and fully checked (except for the existence of the nodes) */
     ret = lyxp_expr_parse(ctx->ctx, dev_p->nodeid, strlen(dev_p->nodeid), 0, &exp);
     LY_CHECK_GOTO(ret, cleanup);
 
-    mod = lys_schema_node_get_module(ctx->ctx, exp->expr + exp->tok_pos[1], exp->tok_len[1], mod_def, NULL, NULL);
+    mod = lys_schema_node_get_module(ctx->ctx, exp->expr + exp->tok_pos[1], exp->tok_len[1], pmod, NULL, NULL);
     LY_CHECK_ERR_GOTO(!mod, LOGINT(ctx->ctx); ret = LY_EINT, cleanup);
     if (mod != ctx->mod) {
         /* deviation for another module, ignore */
@@ -7092,8 +7094,8 @@ lys_precompile_own_deviation(struct lysc_ctx *ctx, struct lysp_deviation *dev_p,
 
     /* try to find the node in already compiled deviations */
     for (i = 0; i < ctx->devs.count; ++i) {
-        if (lys_abs_schema_nodeid_match(ctx->ctx, exp, mod_def, ((struct lysc_deviation *)ctx->devs.objs[i])->nodeid,
-                ((struct lysc_deviation *)ctx->devs.objs[i])->nodeid_mod)) {
+        if (lys_abs_schema_nodeid_match(ctx->ctx, exp, pmod, ((struct lysc_deviation *)ctx->devs.objs[i])->nodeid,
+                ((struct lysc_deviation *)ctx->devs.objs[i])->nodeid_pmod)) {
             dev = ctx->devs.objs[i];
             break;
         }
@@ -7107,14 +7109,14 @@ lys_precompile_own_deviation(struct lysc_ctx *ctx, struct lysp_deviation *dev_p,
 
         dev->nodeid = exp;
         exp = NULL;
-        dev->nodeid_mod = mod_def;
+        dev->nodeid_pmod = pmod;
     }
 
     /* add new parsed deviation structure */
     LY_ARRAY_NEW_GOTO(ctx->ctx, dev->devs, new_dev, ret, cleanup);
     *new_dev = dev_p;
-    LY_ARRAY_NEW_GOTO(ctx->ctx, dev->dev_mods, new_dev_mod, ret, cleanup);
-    *new_dev_mod = mod_def;
+    LY_ARRAY_NEW_GOTO(ctx->ctx, dev->dev_pmods, new_dev_pmod, ret, cleanup);
+    *new_dev_pmod = pmod;
 
 cleanup:
     lyxp_expr_free(ctx->ctx, exp);
@@ -7142,13 +7144,14 @@ lys_precompile_own_deviations(struct lysc_ctx *ctx)
 
         /* compile all module deviations */
         LY_ARRAY_FOR(dev_mod->parsed->deviations, v) {
-            LY_CHECK_RET(lys_precompile_own_deviation(ctx, &dev_mod->parsed->deviations[v], dev_mod));
+            LY_CHECK_RET(lys_precompile_own_deviation(ctx, &dev_mod->parsed->deviations[v], dev_mod->parsed));
         }
 
         /* compile all submodules deviations */
         LY_ARRAY_FOR(dev_mod->parsed->includes, v) {
             LY_ARRAY_FOR(dev_mod->parsed->includes[v].submodule->deviations, w) {
-                LY_CHECK_RET(lys_precompile_own_deviation(ctx, &dev_mod->parsed->includes[v].submodule->deviations[w], dev_mod));
+                LY_CHECK_RET(lys_precompile_own_deviation(ctx, &dev_mod->parsed->includes[v].submodule->deviations[w],
+                        (struct lysp_module *)dev_mod->parsed->includes[v].submodule));
             }
         }
     }
@@ -7413,7 +7416,8 @@ lys_precompile_augments_deviations(struct lysc_ctx *ctx)
         if (mod != ctx->mod) {
             /* apply the augment, find the target node first */
             flags = 0;
-            ret = lysc_resolve_schema_nodeid(ctx, mod_p->augments[u].nodeid, 0, NULL, ctx->mod_def, 0, &target, &flags);
+            ret = lysc_resolve_schema_nodeid(ctx, mod_p->augments[u].nodeid, 0, NULL, LY_PREF_SCHEMA, (void *)mod_p, 0,
+                    &target, &flags);
             LY_CHECK_RET(ret);
 
             /* apply the augment */
@@ -7456,7 +7460,8 @@ lys_precompile_augments_deviations(struct lysc_ctx *ctx)
             lys_array_add_mod_ref(ctx, ctx->mod, &mod->augmented_by);
             if (mod != ctx->mod) {
                 flags = 0;
-                ret = lysc_resolve_schema_nodeid(ctx, mod_p->augments[u].nodeid, 0, NULL, ctx->mod_def, 0, &target, &flags);
+                ret = lysc_resolve_schema_nodeid(ctx, mod_p->augments[u].nodeid, 0, NULL, LY_PREF_SCHEMA, submod, 0,
+                        &target, &flags);
                 LY_CHECK_RET(ret);
 
                 ctx->options |= flags;
@@ -7619,12 +7624,14 @@ lys_compile_extension_instance(struct lysc_ctx *ctx, const struct lysp_ext_insta
                         compiled = (void *)type;
                     }
 
-                    LY_CHECK_ERR_GOTO(r = lysp_stmt_parse(ctx, stmt, stmt->kw, &parsed, NULL), ret = r, cleanup);
-                    LY_CHECK_ERR_GOTO(r = lys_compile_type(ctx, ext->parent_type == LYEXT_PAR_NODE ? ((struct lysc_node *)ext->parent)->sp : NULL,
-                            flags ? *flags : 0, ctx->mod_def->parsed, ext->name, parsed, (struct lysc_type **)compiled,
-                            units && !*units ? units : NULL, NULL), lysp_type_free(ctx->ctx, parsed); free(parsed); ret = r, cleanup);
+                    r = lysp_stmt_parse(ctx, stmt, stmt->kw, &parsed, NULL);
+                    LY_CHECK_ERR_GOTO(r, ret = r, cleanup);
+                    r = lys_compile_type(ctx, ext->parent_type == LYEXT_PAR_NODE ? ((struct lysc_node *)ext->parent)->sp : NULL,
+                            flags ? *flags : 0, ctx->mod_def, ext->name, parsed, (struct lysc_type **)compiled,
+                            units && !*units ? units : NULL, NULL);
                     lysp_type_free(ctx->ctx, parsed);
                     free(parsed);
+                    LY_CHECK_ERR_GOTO(r, ret = r, cleanup);
                     break;
                 }
                 case LY_STMT_IF_FEATURE: {
@@ -7643,7 +7650,7 @@ lys_compile_extension_instance(struct lysc_ctx *ctx, const struct lysp_ext_insta
                         LY_ARRAY_NEW_GOTO(ctx->ctx, *iffs, iff, ret, cleanup);
                     }
                     qname.str = stmt->arg;
-                    qname.mod = ctx->mod_def;
+                    qname.pmod = ctx->mod_def;
                     LY_CHECK_ERR_GOTO(r = lys_compile_iffeature(ctx, &qname, iff), ret = r, cleanup);
                     break;
                 }
@@ -7717,7 +7724,7 @@ lys_compile_unres_when_cyclic(struct lyxp_set *set, const struct lysc_node *node
         do {
             LY_ARRAY_FOR(node->when, u) {
                 when = node->when[u];
-                ret = lyxp_atomize(when->cond, LY_PREF_SCHEMA, when->module, when->context,
+                ret = lyxp_atomize(when->cond, LY_PREF_SCHEMA_RESOLVED, when->prefixes, when->context,
                         when->context ? LYXP_NODE_ELEM : LYXP_NODE_ROOT_CONFIG, &tmp_set, LYXP_SCNODE_SCHEMA);
                 if (ret != LY_SUCCESS) {
                     LOGVAL(set->ctx, LY_VLOG_LYSC, node, LYVE_SEMANTICS, "Invalid when condition \"%s\".", when->cond->expr);
@@ -7835,8 +7842,8 @@ lys_compile_unres_xpath(struct lysc_ctx *ctx, const struct lysc_node *node)
 
     /* check "when" */
     LY_ARRAY_FOR(when, u) {
-        ret = lyxp_atomize(when[u]->cond, LY_PREF_SCHEMA, when[u]->module, when[u]->context ? when[u]->context : node,
-                when[u]->context ? LYXP_NODE_ELEM : LYXP_NODE_ROOT_CONFIG, &tmp_set, opts);
+        ret = lyxp_atomize(when[u]->cond, LY_PREF_SCHEMA_RESOLVED, when[u]->prefixes, when[u]->context ?
+                when[u]->context : node, when[u]->context ? LYXP_NODE_ELEM : LYXP_NODE_ROOT_CONFIG, &tmp_set, opts);
         if (ret != LY_SUCCESS) {
             LOGVAL(ctx->ctx, LY_VLOG_LYSC, node, LYVE_SEMANTICS, "Invalid when condition \"%s\".", when[u]->cond->expr);
             goto cleanup;
@@ -7850,8 +7857,8 @@ lys_compile_unres_xpath(struct lysc_ctx *ctx, const struct lysc_node *node)
                 struct lysc_node *schema = tmp_set.val.scnodes[i].scnode;
 
                 /* XPath expression cannot reference "lower" status than the node that has the definition */
-                ret = lysc_check_status(ctx, when[u]->flags, when[u]->module, node->name, schema->flags, schema->module,
-                        schema->name);
+                ret = lysc_check_status(ctx, when[u]->flags, (void *)ly_resolve_prefix(ctx->ctx, NULL, 0,
+                        LY_PREF_SCHEMA_RESOLVED, when[u]->prefixes), node->name, schema->flags, schema->module, schema->name);
                 LY_CHECK_GOTO(ret, cleanup);
 
                 /* check dummy node accessing */
@@ -7873,7 +7880,7 @@ lys_compile_unres_xpath(struct lysc_ctx *ctx, const struct lysc_node *node)
 check_musts:
     /* check "must" */
     LY_ARRAY_FOR(musts, u) {
-        ret = lyxp_atomize(musts[u].cond, LY_PREF_SCHEMA, musts[u].module, node, LYXP_NODE_ELEM, &tmp_set, opts);
+        ret = lyxp_atomize(musts[u].cond, LY_PREF_SCHEMA_RESOLVED, musts[u].prefixes, node, LYXP_NODE_ELEM, &tmp_set, opts);
         if (ret != LY_SUCCESS) {
             LOGVAL(ctx->ctx, LY_VLOG_LYSC, node, LYVE_SEMANTICS, "Invalid must restriction \"%s\".", musts[u].cond->expr);
             goto cleanup;
@@ -7885,7 +7892,8 @@ check_musts:
             /* skip roots'n'stuff */
             if (tmp_set.val.scnodes[i].type == LYXP_NODE_ELEM) {
                 /* XPath expression cannot reference "lower" status than the node that has the definition */
-                ret = lysc_check_status(ctx, node->flags, musts[u].module, node->name, tmp_set.val.scnodes[i].scnode->flags,
+                ret = lysc_check_status(ctx, node->flags, (void *)ly_resolve_prefix(ctx->ctx, NULL, 0,
+                        LY_PREF_SCHEMA_RESOLVED, musts[u].prefixes), node->name, tmp_set.val.scnodes[i].scnode->flags,
                         tmp_set.val.scnodes[i].scnode->module, tmp_set.val.scnodes[i].scnode->name);
                 LY_CHECK_GOTO(ret, cleanup);
             }
@@ -7913,7 +7921,7 @@ cleanup:
  *
  * @param[in] ctx Compile context.
  * @param[in] node Context node for the leafref.
- * @param[in] lref Leafref to resolve.
+ * @param[in] lref Leafref to check/resolve.
  * @return LY_ERR value.
  */
 static LY_ERR
@@ -7926,9 +7934,8 @@ lys_compile_unres_leafref(struct lysc_ctx *ctx, const struct lysc_node *node, st
     assert(node->nodetype & (LYS_LEAF | LYS_LEAFLIST));
 
     /* try to find the target */
-    LY_CHECK_RET(ly_path_compile(ctx->ctx, node->module, node, lref->path, LY_PATH_LREF_TRUE,
-            lysc_is_output(node) ? LY_PATH_OPER_OUTPUT : LY_PATH_OPER_INPUT, LY_PATH_TARGET_MANY,
-            LY_PREF_SCHEMA, (void *)lref->path_mod, &p));
+    LY_CHECK_RET(ly_path_compile(ctx->ctx, node, lref->path, LY_PATH_LREF_TRUE, lysc_is_output(node) ?
+            LY_PATH_OPER_OUTPUT : LY_PATH_OPER_INPUT, LY_PATH_TARGET_MANY, LY_PREF_SCHEMA_RESOLVED, lref->prefixes, &p));
 
     /* get the target node */
     target = p[LY_ARRAY_COUNT(p) - 1].node;
@@ -8028,18 +8035,18 @@ cleanup:
  * @param[in] node Leaf or leaf-list to compile the default value(s) for.
  * @param[in] type Type of the default value.
  * @param[in] dflt Default value.
- * @param[in] dflt_mod Local module for @p dflt.
+ * @param[in] dflt_pmod Local parsed module for @p dflt.
  * @param[in,out] storage Storage for the compiled default value.
  * @return LY_ERR value.
  */
 static LY_ERR
 lys_compile_unres_dflt(struct lysc_ctx *ctx, struct lysc_node *node, struct lysc_type *type, const char *dflt,
-        const struct lys_module *dflt_mod, struct lyd_value *storage)
+        const struct lysp_module *dflt_pmod, struct lyd_value *storage)
 {
     LY_ERR ret;
     struct ly_err_item *err = NULL;
 
-    ret = type->plugin->store(ctx->ctx, type, dflt, strlen(dflt), 0, LY_PREF_SCHEMA, (void *)dflt_mod, LYD_HINT_SCHEMA,
+    ret = type->plugin->store(ctx->ctx, type, dflt, strlen(dflt), 0, LY_PREF_SCHEMA, (void *)dflt_pmod, LYD_HINT_SCHEMA,
             node, storage, &err);
     if (ret == LY_EINCOMPLETE) {
         /* we have no data so we will not be resolving it */
@@ -8089,7 +8096,7 @@ lys_compile_unres_leaf_dlft(struct lysc_ctx *ctx, struct lysc_node_leaf *leaf, s
     LY_CHECK_ERR_RET(!leaf->dflt, LOGMEM(ctx->ctx), LY_EMEM);
 
     /* store the default value */
-    ret = lys_compile_unres_dflt(ctx, (struct lysc_node *)leaf, leaf->type, dflt->str, dflt->mod, leaf->dflt);
+    ret = lys_compile_unres_dflt(ctx, (struct lysc_node *)leaf, leaf->type, dflt->str, dflt->pmod, leaf->dflt);
     if (ret) {
         free(leaf->dflt);
         leaf->dflt = NULL;
@@ -8135,14 +8142,14 @@ lys_compile_unres_llist_dflts(struct lysc_ctx *ctx, struct lysc_node_leaflist *l
     if (dflts) {
         LY_ARRAY_FOR(dflts, u) {
             llist->dflts[orig_count + u] = calloc(1, sizeof **llist->dflts);
-            ret = lys_compile_unres_dflt(ctx, (struct lysc_node *)llist, llist->type, dflts[u].str, dflts[u].mod,
+            ret = lys_compile_unres_dflt(ctx, (struct lysc_node *)llist, llist->type, dflts[u].str, dflts[u].pmod,
                     llist->dflts[orig_count + u]);
             LY_CHECK_ERR_RET(ret, free(llist->dflts[orig_count + u]), ret);
             LY_ARRAY_INCREMENT(llist->dflts);
         }
     } else {
         llist->dflts[orig_count] = calloc(1, sizeof **llist->dflts);
-        ret = lys_compile_unres_dflt(ctx, (struct lysc_node *)llist, llist->type, dflt->str, dflt->mod,
+        ret = lys_compile_unres_dflt(ctx, (struct lysc_node *)llist, llist->type, dflt->str, dflt->pmod,
                 llist->dflts[orig_count]);
         LY_CHECK_ERR_RET(ret, free(llist->dflts[orig_count]), ret);
         LY_ARRAY_INCREMENT(llist->dflts);
@@ -8243,7 +8250,7 @@ lys_compile_unres(struct lysc_ctx *ctx)
         aug = ctx->augs.objs[i];
         LOGVAL(ctx->ctx, LY_VLOG_NONE, NULL, LYVE_REFERENCE,
                 "Augment target node \"%s\" from module \"%s\" was not found.", aug->nodeid->expr,
-                aug->nodeid_mod->name);
+                LYSP_MODULE_NAME(aug->nodeid_pmod));
     }
     if (ctx->augs.count) {
         return LY_ENOTFOUND;
@@ -8254,7 +8261,7 @@ lys_compile_unres(struct lysc_ctx *ctx)
         dev = ctx->devs.objs[i];
         LOGVAL(ctx->ctx, LY_VLOG_NONE, NULL, LYVE_REFERENCE,
                 "Deviation(s) target node \"%s\" from module \"%s\" was not found.", dev->nodeid->expr,
-                dev->nodeid_mod->name);
+                LYSP_MODULE_NAME(dev->nodeid_pmod));
     }
     if (ctx->devs.count) {
         return LY_ENOTFOUND;
@@ -8420,7 +8427,7 @@ lys_compile(struct lys_module *mod, uint32_t options)
 
     ctx.ctx = mod->ctx;
     ctx.mod = mod;
-    ctx.mod_def = mod;
+    ctx.mod_def = sp;
     ctx.options = options;
     ctx.path_len = 1;
     ctx.path[0] = '/';
@@ -8462,6 +8469,8 @@ lys_compile(struct lys_module *mod, uint32_t options)
     /* the same for submodules */
     LY_ARRAY_FOR(sp->includes, u) {
         submod = sp->includes[u].submodule;
+        ctx.mod_def = (struct lysp_module *)submod;
+
         LY_LIST_FOR(submod->data, pnode) {
             ret = lys_compile_node(&ctx, pnode, NULL, 0, NULL);
             LY_CHECK_GOTO(ret, error);
@@ -8478,6 +8487,7 @@ lys_compile(struct lys_module *mod, uint32_t options)
 
     /* validate non-instantiated groupings from the parsed schema,
      * without it we would accept even the schemas with invalid grouping specification */
+    ctx.mod_def = sp;
     ctx.options |= LYS_COMPILE_GROUPING;
     LY_ARRAY_FOR(sp->groupings, u) {
         if (!(sp->groupings[u].flags & LYS_USED_GRP)) {
@@ -8494,6 +8504,8 @@ lys_compile(struct lys_module *mod, uint32_t options)
     }
     LY_ARRAY_FOR(sp->includes, u) {
         submod = sp->includes[u].submodule;
+        ctx.mod_def = (struct lysp_module *)submod;
+
         LY_ARRAY_FOR(submod->groupings, u) {
             if (!(submod->groupings[u].flags & LYS_USED_GRP)) {
                 LY_CHECK_GOTO(ret = lys_compile_grouping(&ctx, pnode, &submod->groupings[u]), error);
@@ -8508,6 +8520,7 @@ lys_compile(struct lys_module *mod, uint32_t options)
             }
         }
     }
+    ctx.mod_def = sp;
 
 #if 0
     /* hack for NETCONF's edit-config's operation attribute. It is not defined in the schema, but since libyang
